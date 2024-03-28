@@ -32,9 +32,6 @@ requires-python = ">=3.8"
 [project.scripts]
 restart_fizzled = "run_defects.cli.restart_fizzled:main"
 
-line-length = 88
-indent-width = 4
-
 [tool.mypy]
 ignore_missing_imports = true
 no_strict_optional = true
@@ -79,4 +76,6 @@ lint.ignore = [
 lint.pydocstyle.convention = "google"
 lint.isort.known-first-party = ["run_defects"]
 lint.isort.split-on-trailing-comma = false
+lint.extend-safe-fixes = ["TCH"]
+
 
