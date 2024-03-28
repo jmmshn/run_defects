@@ -1,2 +1,3 @@
 # run_defects
-Analysis code to drive MS Defects project
+Analysis and builder codes for point defects.
+
