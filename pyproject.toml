@@ -30,7 +30,7 @@ readme = "README.md"
 requires-python = ">=3.8"
 
 [project.scripts]
-restart_fizzled = "run_defects.cli.restart:main"
+restart_fizzled = "run_defects.cli.restart_fizzled:main"
 
 
 [tool.ruff]
