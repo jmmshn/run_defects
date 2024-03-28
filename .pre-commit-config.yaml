@@ -13,7 +13,7 @@ repos:
   rev: v1.8.0
   hooks:
   - id: mypy
-    files: ^pymatgen/
+    files: ^src/
     args:
     - --namespace-packages
     - --explicit-package-bases
