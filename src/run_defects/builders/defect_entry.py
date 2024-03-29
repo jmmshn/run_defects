@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from icecream import ic
 from maggma.builders import Builder
+from maggma.builders.map_builder import MapBuilder
 from monty.json import MontyDecoder
 from pymatgen.analysis.defects.supercells import get_closest_sc_mat
 from pymatgen.analysis.defects.thermo import DefectEntry
@@ -175,7 +176,23 @@ class DefectEntryBuilder(Builder):
         self.defect_entry_store.update(items)
 
 
-# def FreysoldtBuilder(MapBuilder)
+class FreysoldtBuilder(MapBuilder):
+    """Perform the Freysoldt Correction."""
+
+    def __init__(
+        self,
+        defect_entry_store: Store,
+        corrected_defect_entry_store: Store,
+        **kwargs,
+    ) -> None:
+        """Init."""
+        self.defect_entry_store = defect_entry_store
+        self.corrected_defect_entry_store = corrected_defect_entry_store
+        super().__init__(
+            source=self.defect_entry_store,
+            target=self.corrected_defect_entry_store,
+            **kwargs,
+        )
 
 
 def mdecode(data: dict) -> Any:
