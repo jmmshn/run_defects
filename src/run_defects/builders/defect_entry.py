@@ -262,17 +262,19 @@ class FreysoldtBuilder(MapBuilder):
         defect_locpot = mdecode(item["defect_locpot"])
         bulk_doc = min(item["candidate_bulk_docs"], key=_get_energy)
         bulk_locpot = mdecode(bulk_doc["vasp_objects"]["locpot"])
-        defect_entry = DefectEntry.from_dict(item["defect_entry"])
+        defect_entry = DefectEntry.from_dict(item.pop("defect_entry"))
         dielectric = item["dielectric_data"]["e_total"]
         correction_results = defect_entry.get_freysoldt_correction(
             defect_locpot=defect_locpot,
             bulk_locpot=bulk_locpot,
             dielectric=dielectric,
         )
+        defect_entry.bulk_entry = ComputedEntry.from_dict(bulk_doc["entry"])
         return {
-            "task_id": item["task_id"],
             "freysoldt_data": correction_results.as_dict(),
             "defect_entry": defect_entry.as_dict(),
+            "defect_run_type": item["defect_run_type"],
+            "defect_chemsys": item["defect_chemsys"],
         }
 
     def _replace_blob(self, doc: dict | list | Any, dry_run: bool = True) -> dict:
@@ -284,7 +286,7 @@ class FreysoldtBuilder(MapBuilder):
                     doc["blob_uuid"],
                     doc["store"],
                     dry_run,
-                    str(self.jobstore.as_dict()),
+                    self.jobstore.to_json(),
                 )
             for k, v in doc.items():
                 d_out[k] = self._replace_blob(v, dry_run=dry_run)
