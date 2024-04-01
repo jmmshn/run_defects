@@ -3,9 +3,10 @@
 # %%
 from __future__ import annotations
 
+import collections
+import datetime
 import itertools
 import logging
-from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,11 @@ from pymatgen.ext.matproj import MPRester
 
 azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
 azlogger.setLevel(logging.WARNING)
+
+
+def _utc() -> datetime.datetime:
+    """Get the current time in UTC."""
+    return datetime.datetime.now(datetime.UTC)
 
 
 if TYPE_CHECKING:
@@ -216,12 +222,133 @@ class DefectEntryBuilder(Builder):
         """Update the target store."""
         items = list(filter(None, itertools.chain.from_iterable(items)))
         for doc in items:
-            doc[self.defect_entry_store.last_updated_field] = datetime.utcnow()
+            doc[self.defect_entry_store.last_updated_field] = _utc()
         self.defect_entry_store.update(items)
 
 
 class PDBuilder(Builder):
     """Grab the elemental entries and make the PD."""
+
+    def __init__(
+        self,
+        jobstore: JobStore,
+        defect_entry_store: Store,
+        pd_store: Store,
+        thermo_type: str = "GGA_GGA+U",
+        **kwargs,
+    ) -> None:
+        """Init."""
+        self.jobstore = jobstore
+        self.defect_entry_store = defect_entry_store
+        self.pd_store = pd_store
+        self.thermo_type = thermo_type
+        if self.pd_store.key != "chemsys_and_type":
+            raise ValueError("PD Store key must be 'chemsys_and_type'")
+        super().__init__(
+            sources=[self.jobstore, self.defect_entry_store],
+            targets=[self.pd_store],
+            **kwargs,
+        )
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
+        all_chemsys = self.defect_entry_store.distinct("defect_chemsys")
+        for chemsys in all_chemsys:
+            with MPRester() as mp:
+                yield {
+                    "chemsys": chemsys,
+                    "phase_diagram": mp.thermo.get_phase_diagram_from_chemsys(
+                        "Ga-N", "GGA_GGA+U"
+                    ).as_dict(),
+                }
+
+    def process_item(self, item: dict) -> dict:
+        """Process the item."""
+        chemsys = item["chemsys"]
+        return {
+            "phase_diagram": item["phase_diagram"],
+            "chemsys": chemsys,
+            "thermo_type": self.thermo_type,
+            "chemsys_and_type": f"{chemsys}:{self.thermo_type}",
+        }
+
+    def update_targets(self, items: dict | list) -> None:
+        """Update the target store."""
+        items = list(filter(None, items))
+        for doc in items:
+            doc[self.pd_store.last_updated_field] = _utc()
+        self.pd_store.update(items)
+
+
+class ElementBuilder(Builder):
+    """Build the elemental entries."""
+
+    def __init__(
+        self, jobstore: JobStore, element_store: Store, query: dict = None, **kwargs
+    ) -> None:
+        """Init."""
+        self.query = query or {}
+        self.jobstore = jobstore
+        self.element_store = element_store
+        super().__init__(
+            sources=[self.jobstore], targets=[self.element_store], **kwargs
+        )
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
+        unique_atoms = self.jobstore.distinct(
+            "output.formula_pretty", criteria={"output.nelements": 1}
+        )
+        run_type2chemsys = collections.defaultdict(set)
+        for chemsys in unique_atoms:
+            for d in self.jobstore.query(
+                {"output.formula_pretty": chemsys},
+                properties=["output.calcs_reversed.run_type"],
+            ):
+                run_type2chemsys[d["output"]["calcs_reversed"][0]["run_type"]].add(
+                    chemsys
+                )
+        for run_type, chemsys_set in run_type2chemsys.items():
+            elements = list(set("-".join(chemsys_set).split("-")))
+            js_query = {
+                "output.calcs_reversed.run_type": run_type,
+                "output.formula_pretty": {"$in": elements},
+                **self.query,
+            }
+            js_properties = [
+                "output.formula_pretty",
+                "output.entry",
+                "output.structure",
+                "output.calcs_reversed.run_type",
+            ]
+            yield {
+                "run_type": run_type,
+                "job_docs": list(
+                    self.jobstore.query(js_query, properties=js_properties)
+                ),
+            }
+
+    def process_item(self, item: Any) -> Any:
+        """Process the item."""
+        job_docs = item["job_docs"]
+        run_type = item["run_type"]
+        for g, docs in itertools.groupby(
+            job_docs, key=lambda d: d["output"]["formula_pretty"]
+        ):
+            entries = [*map(_get_sc_entry, docs)]
+            stable_entry = min(entries, key=lambda ent: ent.energy_per_atom)
+            yield {
+                "entries": item,
+                "stable_entry": stable_entry.as_dict(),
+                "element_and_type": f"{g}:{run_type}",
+            }
+
+    def update_targets(self, items: dict | list) -> None:
+        """Update the target store."""
+        items = list(filter(None, items))
+        for doc in items:
+            doc[self.element_store.last_updated_field] = _utc()
+        self.element_store.update(items)
 
 
 class FreysoldtBuilder(MapBuilder):
