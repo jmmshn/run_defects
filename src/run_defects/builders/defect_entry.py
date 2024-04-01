@@ -199,7 +199,7 @@ class DefectEntryBuilder(Builder):
                 sc_entry=_get_sc_entry(job_doc),
             )
             candidate_bulk_docs = []
-
+            bulk_formula = item["formula"]
             for locpot_doc in item["locpot_docs"]:
                 for run_doc in locpot_doc["runs"][defect_run_type]:
                     bulk_struct = mdecode(run_doc["structure"])
@@ -216,6 +216,9 @@ class DefectEntryBuilder(Builder):
                 "task_id": defect_entry.entry_id,
                 "defect_run_type": defect_run_type,
                 "defect_chemsys": chemsys,
+                "defect_name": defect_obj.name,
+                "bulk_formula": bulk_formula,
+                "defect": defect_obj.as_dict(),
             }
 
     def update_targets(self, items: dict | list) -> None:
@@ -405,6 +408,11 @@ class FreysoldtBuilder(MapBuilder):
             "defect_entry": defect_entry.as_dict(),
             "defect_run_type": item["defect_run_type"],
             "defect_chemsys": item["defect_chemsys"],
+            "bulk_formula": item["bulk_formula"],
+            "bulk_structure": bulk_doc["structure"],
+            "defect_name": item["defect_name"],
+            "defect": item["defect"],
+            "task_id": item["task_id"],
         }
 
     def _replace_blob(self, doc: dict | list | Any, dry_run: bool = True) -> dict:
@@ -424,6 +432,47 @@ class FreysoldtBuilder(MapBuilder):
         if isinstance(doc, list):
             return [self._replace_blob(d, dry_run=dry_run) for d in doc]  # type: ignore[return-value]
         return doc
+
+
+class FormationEnergyBuilder(Builder):
+    """Build the formation energy data."""
+
+    def __inti__(
+        self,
+        corrected_defect_entry_store: Store,
+        element_store: Store,
+        pd_store: Store,
+        formation_energy_store: Store,
+        **kwargs,
+    ) -> None:
+        """Init."""
+        self.corrected_defect_entry_store = corrected_defect_entry_store
+        self.element_store = element_store
+        self.pd_store = pd_store
+        self.formation_energy_store = formation_energy_store
+        super().__init__(
+            sources=[
+                self.corrected_defect_entry_store,
+                self.element_store,
+                self.pd_store,
+            ],
+            targets=[self.formation_energy_store],
+            **kwargs,
+        )
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
+        bulk_formulas = self.corrected_defect_entry_store.distinct("bulk_formula")
+        for bulk_formula in bulk_formulas:
+            elements = set()
+            # defect_names = self.corrected_defect_entry_store.distinct()
+            for doc in self.corrected_defect_entry_store.query(
+                {"bulk_formula": bulk_formula}
+            ):
+                # run_type = doc["defect_run_type"]
+                defect_chemsys = doc["defect_chemsys"]
+                elements |= set(defect_chemsys.split("-"))
+                yield doc
 
 
 @lru_cache(maxsize=200)
