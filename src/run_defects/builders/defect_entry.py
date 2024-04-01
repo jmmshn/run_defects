@@ -290,6 +290,8 @@ class ElementBuilder(Builder):
         self.query = query or {}
         self.jobstore = jobstore
         self.element_store = element_store
+        if self.element_store.key != "chemsys_and_type":
+            raise ValueError("PD Store key must be 'chemsys_and_type'")
         super().__init__(
             sources=[self.jobstore], targets=[self.element_store], **kwargs
         )
@@ -336,16 +338,17 @@ class ElementBuilder(Builder):
             job_docs, key=lambda d: d["output"]["formula_pretty"]
         ):
             entries = [*map(_get_sc_entry, docs)]
+            ic(len(entries))
             stable_entry = min(entries, key=lambda ent: ent.energy_per_atom)
             yield {
-                "entries": item,
+                "entries": [ent_.as_dict() for ent_ in entries],
                 "stable_entry": stable_entry.as_dict(),
-                "element_and_type": f"{g}:{run_type}",
+                "chemsys_and_type": f"{g}:{run_type}",
             }
 
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
-        items = list(filter(None, items))
+        items = list(filter(None, itertools.chain.from_iterable(items)))
         for doc in items:
             doc[self.element_store.last_updated_field] = _utc()
         self.element_store.update(items)
