@@ -14,7 +14,7 @@ from monty.json import MontyDecoder
 from pymatgen.analysis.defects.supercells import get_closest_sc_mat
 from pymatgen.analysis.defects.thermo import DefectEntry
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
-from pymatgen.entries.computed_entries import ComputedStructureEntry
+from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -183,16 +183,60 @@ class FreysoldtBuilder(MapBuilder):
         self,
         defect_entry_store: Store,
         corrected_defect_entry_store: Store,
+        jobstore: JobStore,
+        dry_run: bool = True,
         **kwargs,
     ) -> None:
         """Init."""
         self.defect_entry_store = defect_entry_store
         self.corrected_defect_entry_store = corrected_defect_entry_store
+        self.jobstore = jobstore
         super().__init__(
             source=self.defect_entry_store,
             target=self.corrected_defect_entry_store,
             **kwargs,
         )
+        self.sources.append(jobstore)
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
+        # call the parent class method
+        for doc in super().get_items():
+            yield replace_blob(doc, self.jobstore, dry_run=False)
+
+    def unary_function(self, item: dict) -> dict:
+        """Perform the Freysoldt Correction."""
+        defect_locpot = mdecode(item["defect_locpot"])
+        bulk_doc = min(item["candidate_bulk_docs"], key=_get_energy)
+        bulk_locpot = mdecode(bulk_doc["vasp_objects"]["locpot"])
+        defect_entry = DefectEntry.from_dict(item["defect_entry"])
+        self.logger.info(defect_entry, defect_locpot, bulk_locpot)
+        return {}
+
+
+def _get_energy(bulk_doc: dict) -> float:
+    """Get the effective energy for each bulk doc."""
+    return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
+
+
+def replace_blob(
+    doc: dict | list | Any, jobstore: JobStore, dry_run: bool = True
+) -> dict:
+    """Replace the blob search docs with the data."""
+    if isinstance(doc, dict):
+        d_out = {}
+        if "blob_uuid" in doc and "store" in doc:
+            blob_store = jobstore.additional_stores[doc["store"]]
+            blob_store_tmp = blob_store.index if dry_run else blob_store
+            with blob_store_tmp as store:
+                blob_dat = store.query_one({"blob_uuid": doc["blob_uuid"]})
+                return blob_dat if dry_run else blob_dat["data"]
+        for k, v in doc.items():
+            d_out[k] = replace_blob(v, jobstore=jobstore, dry_run=dry_run)
+        return d_out
+    if isinstance(doc, list):
+        return [replace_blob(d, jobstore=jobstore, dry_run=dry_run) for d in doc]  # type: ignore[return-value]
+    return doc
 
 
 def mdecode(data: dict) -> Any:

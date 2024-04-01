@@ -17,6 +17,7 @@ repos:
     args:
     - --namespace-packages
     - --explicit-package-bases
+    - --show-error-codes
     additional_dependencies:
     - tokenize-rt==4.1.0
     - types-pkg_resources==0.1.2
