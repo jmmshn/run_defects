@@ -5,16 +5,20 @@ from __future__ import annotations
 
 import itertools
 from datetime import datetime
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 from icecream import ic
 from maggma.builders import Builder
 from maggma.builders.map_builder import MapBuilder
+from maggma.core import Store
 from monty.json import MontyDecoder
 from pymatgen.analysis.defects.supercells import get_closest_sc_mat
 from pymatgen.analysis.defects.thermo import DefectEntry
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
+from pymatgen.core import IStructure, Structure
 from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
+from pymatgen.ext.matproj import MPRester
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -33,6 +37,33 @@ DEFECT_JOB_PROPERTIES = [
     "output.calcs_reversed.run_type",
     "output.additional_json.info",
 ]
+
+
+@lru_cache(maxsize=200)
+def get_dielectric_data(istruct: IStructure) -> dict:
+    """Get the dielectric data from MP."""
+    ss = Structure.from_sites(istruct)
+    with MPRester() as mp:
+        mp_id = mp.find_structure(ss.remove_oxidation_states())
+        (data,) = mp.materials.dielectric.search(mp_id)
+    return data.model_dump()
+
+
+class DielectricBuilder(MapBuilder):
+    """Grab and store the dielectric data from MP."""
+
+    def __init__(
+        self, defect_entry_store: Store, dielectric_store: Store, **kwargs
+    ) -> None:
+        """Init."""
+        super().__init__(source=defect_entry_store, target=dielectric_store, **kwargs)
+
+    def unary_function(self, item: dict) -> dict:
+        """Get the dielectric data."""
+        defect_entry = DefectEntry.from_dict(item["defect_entry"])
+        istruct = IStructure.from_sites(defect_entry.defect.structure)
+        dielectric_data = get_dielectric_data(istruct)
+        return {"task_id": item["task_id"], "dielectric_data": dielectric_data}
 
 
 class DefectEntryBuilder(Builder):
