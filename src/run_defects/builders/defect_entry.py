@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 from datetime import datetime
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,10 @@ from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatc
 from pymatgen.core import IStructure, Structure
 from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
 from pymatgen.ext.matproj import MPRester
+
+azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
+azlogger.setLevel(logging.WARNING)
+
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -56,6 +61,8 @@ class DielectricBuilder(MapBuilder):
         self, defect_entry_store: Store, dielectric_store: Store, **kwargs
     ) -> None:
         """Init."""
+        self.defect_entry_store = defect_entry_store
+        self.dielectric_store = dielectric_store
         super().__init__(source=defect_entry_store, target=dielectric_store, **kwargs)
 
     def unary_function(self, item: dict) -> dict:
@@ -99,6 +106,7 @@ class DefectEntryBuilder(Builder):
         self.locpot_store = locpot_store
         self.defect_entry_store = defect_entry_store
         self.query = query or {}
+        self.match_sc_mat = match_sc_mat
         self.get_bulk_sc = match_sc_mat
         self._primitive_cell = not self.get_bulk_sc
         (
@@ -192,11 +200,16 @@ class DefectEntryBuilder(Builder):
                     if structure_matcher.fit(bulk_struct, ref_struct):
                         candidate_bulk_docs.append(run_doc)
 
+            elements = set(defect_entry.sc_entry.composition.elements)
+            chemsys = "-".join(sorted([el.symbol for el in elements]))
+
             yield {
                 "defect_entry": defect_entry.as_dict(),
                 "candidate_bulk_docs": candidate_bulk_docs,
                 "defect_locpot": job_doc["output"]["vasp_objects"]["locpot"],
                 "task_id": defect_entry.entry_id,
+                "defect_run_type": defect_run_type,
+                "defect_chemsys": chemsys,
             }
 
     def update_targets(self, items: dict | list) -> None:
@@ -207,33 +220,42 @@ class DefectEntryBuilder(Builder):
         self.defect_entry_store.update(items)
 
 
+class PDBuilder(Builder):
+    """Grab the elemental entries and make the PD."""
+
+
 class FreysoldtBuilder(MapBuilder):
     """Perform the Freysoldt Correction."""
 
     def __init__(
         self,
         defect_entry_store: Store,
+        dielectric_store: Store,
         corrected_defect_entry_store: Store,
         jobstore: JobStore,
-        dry_run: bool = True,
         **kwargs,
     ) -> None:
         """Init."""
         self.defect_entry_store = defect_entry_store
-        self.corrected_defect_entry_store = corrected_defect_entry_store
         self.jobstore = jobstore
+        self.dielectric_store = dielectric_store
+        self.corrected_defect_entry_store = corrected_defect_entry_store
         super().__init__(
             source=self.defect_entry_store,
             target=self.corrected_defect_entry_store,
             **kwargs,
         )
-        self.sources.append(jobstore)
+        self.sources.extend([self.jobstore, self.dielectric_store])
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
         # call the parent class method
         for doc in super().get_items():
-            yield replace_blob(doc, self.jobstore, dry_run=False)
+            doc_ = self._replace_blob(doc, dry_run=False)
+            doc_["dielectric_data"] = self.dielectric_store.query_one(
+                {"task_id": doc["task_id"]}
+            )["dielectric_data"]
+            yield doc_
 
     def unary_function(self, item: dict) -> dict:
         """Perform the Freysoldt Correction."""
@@ -241,33 +263,50 @@ class FreysoldtBuilder(MapBuilder):
         bulk_doc = min(item["candidate_bulk_docs"], key=_get_energy)
         bulk_locpot = mdecode(bulk_doc["vasp_objects"]["locpot"])
         defect_entry = DefectEntry.from_dict(item["defect_entry"])
-        self.logger.info(defect_entry, defect_locpot, bulk_locpot)
-        return {}
+        dielectric = item["dielectric_data"]["e_total"]
+        correction_results = defect_entry.get_freysoldt_correction(
+            defect_locpot=defect_locpot,
+            bulk_locpot=bulk_locpot,
+            dielectric=dielectric,
+        )
+        return {
+            "task_id": item["task_id"],
+            "freysoldt_data": correction_results.as_dict(),
+            "defect_entry": defect_entry.as_dict(),
+        }
+
+    def _replace_blob(self, doc: dict | list | Any, dry_run: bool = True) -> dict:
+        """Replace the blob search docs with the data."""
+        if isinstance(doc, dict):
+            d_out = {}
+            if "blob_uuid" in doc and "store" in doc:
+                return _read_blob(
+                    doc["blob_uuid"],
+                    doc["store"],
+                    dry_run,
+                    str(self.jobstore.as_dict()),
+                )
+            for k, v in doc.items():
+                d_out[k] = self._replace_blob(v, dry_run=dry_run)
+            return d_out
+        if isinstance(doc, list):
+            return [self._replace_blob(d, dry_run=dry_run) for d in doc]  # type: ignore[return-value]
+        return doc
+
+
+@lru_cache(maxsize=200)
+def _read_blob(blob_uuid: str, store: str, dry_run: bool, jobstore_str: str) -> dict:
+    jobstore = MontyDecoder().decode(jobstore_str)
+    blob_store = jobstore.additional_stores[store]
+    blob_or_index_store = blob_store.index if dry_run else blob_store
+    with blob_or_index_store as s:
+        blob_data = s.query_one({"blob_uuid": blob_uuid})
+    return blob_data if dry_run else blob_data["data"]
 
 
 def _get_energy(bulk_doc: dict) -> float:
     """Get the effective energy for each bulk doc."""
     return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
-
-
-def replace_blob(
-    doc: dict | list | Any, jobstore: JobStore, dry_run: bool = True
-) -> dict:
-    """Replace the blob search docs with the data."""
-    if isinstance(doc, dict):
-        d_out = {}
-        if "blob_uuid" in doc and "store" in doc:
-            blob_store = jobstore.additional_stores[doc["store"]]
-            blob_store_tmp = blob_store.index if dry_run else blob_store
-            with blob_store_tmp as store:
-                blob_dat = store.query_one({"blob_uuid": doc["blob_uuid"]})
-                return blob_dat if dry_run else blob_dat["data"]
-        for k, v in doc.items():
-            d_out[k] = replace_blob(v, jobstore=jobstore, dry_run=dry_run)
-        return d_out
-    if isinstance(doc, list):
-        return [replace_blob(d, jobstore=jobstore, dry_run=dry_run) for d in doc]  # type: ignore[return-value]
-    return doc
 
 
 def mdecode(data: dict) -> Any:
