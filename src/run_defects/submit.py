@@ -30,7 +30,6 @@ INCAR_UPDATES = {
     "ENCUT": 520,
     "ALGO": "Normal",
     "POTIM": 0.25,
-    "LREAL": "Auto",
 }
 
 BULK_RELAX_UC = update_user_incar_settings(
@@ -42,14 +41,11 @@ BULK_STATIC_UC = MPGGAStaticMaker(
 )
 
 BULK_STATIC_UC = update_user_incar_settings(
-    BULK_STATIC_UC, incar_updates=INCAR_UPDATES | {"LVHAR": True}
+    BULK_STATIC_UC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
 )
 
-BULK_STATIC_SC = update_user_incar_settings(
-    BULK_STATIC_UC, incar_updates={"LREAL": "Auto"}
-)
 BULK_STATIC_SC = update_user_kpoints_settings(
-    BULK_STATIC_SC, kpoints_updates=SPECIAL_KPOINT
+    BULK_STATIC_UC, kpoints_updates=SPECIAL_KPOINT
 )
 
 DEFECT_RELAX_SC = update_user_incar_settings(
@@ -61,6 +57,14 @@ DEFECT_RELAX_SC = update_user_incar_settings(
 )
 DEFECT_RELAX_SC = update_user_kpoints_settings(
     DEFECT_RELAX_SC, kpoints_updates=SPECIAL_KPOINT
+)
+
+DEFECT_STATIC_SC = MPGGAStaticMaker(
+    task_document_kwargs={"store_volumetric_data": ["locpot"]},
+)
+
+DEFECT_STATIC_SC = update_user_incar_settings(
+    DEFECT_STATIC_SC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
 )
 
 F_MAKER_UC = FormationEnergyMaker(
