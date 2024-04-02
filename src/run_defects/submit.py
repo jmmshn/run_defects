@@ -63,6 +63,7 @@ DEFECT_STATIC_SC = MPGGAStaticMaker(
     task_document_kwargs={"store_volumetric_data": ["locpot"]},
 )
 
+
 DEFECT_STATIC_SC = update_user_incar_settings(
     DEFECT_STATIC_SC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
 )
