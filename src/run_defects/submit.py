@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from typing import TYPE_CHECKING
 
 import jobflow
@@ -15,10 +16,25 @@ from atomate2.vasp.powerups import (
 from atomate2.vasp.sets.defect import SPECIAL_KPOINT
 from atomate2.vasp.sets.mp import MPGGARelaxSetGenerator
 from jobflow.managers.fireworks import flow_to_workflow
+from pymatgen.analysis.defects.generators import (
+    ChargeInterstitialGenerator,
+    SubstitutionGenerator,
+    VacancyGenerator,
+)
+
+from run_defects.utils import mdecode
+
+VGEN = VacancyGenerator()
+IGEN = ChargeInterstitialGenerator(max_insertions=3)
+SGEN = SubstitutionGenerator()
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
+
     from fireworks import LaunchPad
+    from pymatgen.analysis.defects.core import Defect
     from pymatgen.core import Structure
+    from pymatgen.io.vasp.outputs import VolumetricData
 
 INCAR_UPDATES = {
     "EDIFF": 1e-5,
@@ -62,7 +78,6 @@ DEFECT_RELAX_SC = update_user_kpoints_settings(
 DEFECT_STATIC_SC = MPGGAStaticMaker(
     task_document_kwargs={"store_volumetric_data": ["locpot"]},
 )
-
 
 DEFECT_STATIC_SC = update_user_incar_settings(
     DEFECT_STATIC_SC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
@@ -149,3 +164,50 @@ def get_bulk_flow(
         magmom_vals = {el: 0.6 for el in map(str, struct_.elements)}
         flow = update_user_incar_settings(flow, incar_updates={"MAGMOM": magmom_vals})
     return flow
+
+
+def _get_elements(struct: Structure) -> tuple[tuple[str], ...]:
+    """Get the elements inputs for vacancy and interstitial defects."""
+    s_atoms = sorted(atom.symbol for atom in struct.elements)
+    return tuple((aa_,) for aa_ in s_atoms)
+
+
+def _get_subs(struct: Structure) -> tuple[dict[str, str], ...]:
+    """Get the substitutions."""
+    s_atoms = sorted(atom.symbol for atom in struct.elements)
+    return tuple(
+        itertools.chain.from_iterable(
+            ({a: b}, {b: a}) for a, b in itertools.combinations(s_atoms, 2)
+        )
+    )
+
+
+def _get_defects(
+    chgcar: VolumetricData, max_iter: int = 3
+) -> Generator[tuple[Defect, int], None, None]:
+    tup_el = _get_elements(chgcar.structure)
+    tup_sub = _get_subs(chgcar.structure)
+    for sub_d in tup_sub[:max_iter]:
+        for ii, defect in enumerate(SGEN.generate(chgcar.structure, sub_d)):
+            yield defect, ii
+
+    for el in tup_el[:max_iter]:
+        for ii, defect in enumerate(VGEN.generate(chgcar.structure, el)):
+            yield defect, ii
+
+    for el in tup_el[:max_iter]:
+        for ii, defect in enumerate(
+            IGEN.generate(
+                chgcar,
+                el,
+            )
+        ):
+            yield defect, ii
+
+
+def get_defects(bdoc: dict, max_iter: int) -> Generator:
+    """Process a bulk document with Chgcar then return the defect with job_names."""
+    chgcar = mdecode(bdoc["output"]["vasp_objects"]["chgcar"])
+    uuid = bdoc["uuid"]
+    for defect, ii in _get_defects(chgcar, max_iter):
+        yield defect, f"{uuid}-{defect.name}-{ii}"
