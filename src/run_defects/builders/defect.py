@@ -1,6 +1,5 @@
 """Collect all the usable bulk locpot data in one place."""
 
-# %%
 from __future__ import annotations
 
 import collections
@@ -16,7 +15,11 @@ from maggma.builders.map_builder import MapBuilder
 from maggma.core import Store
 from monty.json import MontyDecoder
 from pymatgen.analysis.defects.supercells import get_closest_sc_mat
-from pymatgen.analysis.defects.thermo import DefectEntry
+from pymatgen.analysis.defects.thermo import (
+    DefectEntry,
+    FormationEnergyDiagram,
+    group_defect_entries,
+)
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
 from pymatgen.core import IStructure, Structure
 from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
@@ -85,7 +88,7 @@ class DefectEntryBuilder(Builder):
     def __init__(
         self,
         jobstore: JobStore,
-        locpot_store: Store,
+        bulk_store: Store,
         defect_entry_store: Store,
         query: dict = None,
         stol: float = 0.3,
@@ -97,10 +100,10 @@ class DefectEntryBuilder(Builder):
         """Init.
 
         Args:
-            jobstore: The jobstore to get the locpot data from.
-            locpot_store: The store to put the locpot data in.
+            jobstore: The jobstore.
+            bulk_store: The store to put the bulk data in.
             defect_entry_store: The store to put the defect entry data in.
-            query: The query to use to get the locpot data from jobstore.
+            query: The query to use to get the defect ent data from jobstore.
             ltol: The length tolerance for the structure matcher.
             stol: The site tolerance for the structure matcher.
             angle_tol: The angle tolerance for the structure matcher.
@@ -109,7 +112,7 @@ class DefectEntryBuilder(Builder):
             kwargs: Other kwargs to pass to the parent class.
         """
         self.jobstore = jobstore
-        self.locpot_store = locpot_store
+        self.bulk_store = bulk_store
         self.defect_entry_store = defect_entry_store
         self.query = query or {}
         self.match_sc_mat = match_sc_mat
@@ -125,7 +128,7 @@ class DefectEntryBuilder(Builder):
             angle_tol,
         )
         super().__init__(
-            sources=[self.jobstore, self.locpot_store],
+            sources=[self.jobstore, self.bulk_store],
             targets=[self.defect_entry_store],
             **kwargs,
         )
@@ -158,17 +161,17 @@ class DefectEntryBuilder(Builder):
             job_docs = list(
                 self.jobstore.query(combo_query, properties=DEFECT_JOB_PROPERTIES)
             )
-            locpot_query = {
+            bulk_query = {
                 "formula_pretty": formula,
                 f"runs.{run_type}": {"$exists": True},
             }
-            locpot_docs = list(self.locpot_store.query(locpot_query))
+            bulk_docs = list(self.bulk_store.query(bulk_query))
             yield {
                 "formula": formula,
                 "defect_name": defect_name,
                 "run_type": run_type,
                 "job_docs": job_docs,
-                "locpot_docs": locpot_docs,
+                "locpot_docs": bulk_docs,
             }
 
     def process_item(self, item: dict) -> Generator:
@@ -341,12 +344,15 @@ class ElementBuilder(Builder):
             job_docs, key=lambda d: d["output"]["formula_pretty"]
         ):
             entries = [*map(_get_sc_entry, docs)]
-            ic(len(entries))
             stable_entry = min(entries, key=lambda ent: ent.energy_per_atom)
+            comp_ = stable_entry.composition
+            chemsys = "-".join(sorted([el.symbol for el in comp_.elements]))
             yield {
                 "entries": [ent_.as_dict() for ent_ in entries],
                 "stable_entry": stable_entry.as_dict(),
                 "chemsys_and_type": f"{g}:{run_type}",
+                "run_type": run_type,
+                "chemsys": chemsys,
             }
 
     def update_targets(self, items: dict | list) -> None:
@@ -410,6 +416,7 @@ class FreysoldtBuilder(MapBuilder):
             "defect_chemsys": item["defect_chemsys"],
             "bulk_formula": item["bulk_formula"],
             "bulk_structure": bulk_doc["structure"],
+            "bulk_entry": bulk_doc["entry"],
             "defect_name": item["defect_name"],
             "defect": item["defect"],
             "task_id": item["task_id"],
@@ -437,12 +444,15 @@ class FreysoldtBuilder(MapBuilder):
 class FormationEnergyBuilder(Builder):
     """Build the formation energy data."""
 
-    def __inti__(
+    def __init__(
         self,
         corrected_defect_entry_store: Store,
         element_store: Store,
         pd_store: Store,
         formation_energy_store: Store,
+        run_type: str,
+        thermo_type: str = "GGA_GGA+U",
+        query: dict = None,
         **kwargs,
     ) -> None:
         """Init."""
@@ -450,6 +460,9 @@ class FormationEnergyBuilder(Builder):
         self.element_store = element_store
         self.pd_store = pd_store
         self.formation_energy_store = formation_energy_store
+        self.run_type = run_type
+        self.query = query or {}
+        self.thermo_type = thermo_type
         super().__init__(
             sources=[
                 self.corrected_defect_entry_store,
@@ -462,17 +475,62 @@ class FormationEnergyBuilder(Builder):
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
-        bulk_formulas = self.corrected_defect_entry_store.distinct("bulk_formula")
+        defect_ent_query = {"defect_run_type": self.run_type, **self.query}
+        bulk_formulas = self.corrected_defect_entry_store.distinct(
+            "bulk_formula", defect_ent_query
+        )
         for bulk_formula in bulk_formulas:
-            elements = set()
-            # defect_names = self.corrected_defect_entry_store.distinct()
-            for doc in self.corrected_defect_entry_store.query(
-                {"bulk_formula": bulk_formula}
-            ):
-                # run_type = doc["defect_run_type"]
-                defect_chemsys = doc["defect_chemsys"]
-                elements |= set(defect_chemsys.split("-"))
-                yield doc
+            defect_names = self.corrected_defect_entry_store.distinct(
+                "defect_name", {"bulk_formula": bulk_formula, **defect_ent_query}
+            )
+            for defect_name in defect_names:
+                defect_entry_docs = list(
+                    self.corrected_defect_entry_store.query(
+                        {
+                            "bulk_formula": bulk_formula,
+                            "defect_name": defect_name,
+                            **defect_ent_query,
+                        }
+                    )
+                )
+                defect_chemsys = defect_entry_docs[0]["defect_chemsys"]
+                elements = list(set(defect_chemsys.split("-")))
+                element_docs = list(
+                    self.element_store.query(
+                        {"chemsys": {"$in": elements}, "run_type": self.run_type}
+                    )
+                )
+                pd_doc = self.pd_store.query_one(
+                    {"chemsys": defect_chemsys, "thermo_type": self.thermo_type}
+                )
+                yield {
+                    "bulk_formula": bulk_formula,
+                    "defect_name": defect_name,
+                    "defect_chemsys": defect_chemsys,
+                    "defect_entry_docs": defect_entry_docs,
+                    "element_docs": element_docs,
+                    "pd_doc": pd_doc,
+                }
+
+    def process_item(self, item: dict) -> dict:
+        """Process the item."""
+        pd_entries = mdecode(item["pd_doc"]["phase_diagram"]["all_entries"])
+        elements = mdecode([d["stable_entry"] for d in item["element_docs"]])
+        defect_entries = mdecode([d["defect_entry"] for d in item["defect_entry_docs"]])
+
+        for _defect_name, gdents_ in group_defect_entries(defect_entries):
+            FormationEnergyDiagram.with_atomic_entries(
+                defect_entries=gdents_,
+                atomic_entries=elements,
+                pd_entries=pd_entries,
+                vbm=0,
+                band_gap=5,
+            )
+
+        return item
+
+    def update_targets(self, items: dict | list) -> None:
+        """Update the target store."""
 
 
 @lru_cache(maxsize=200)
@@ -490,7 +548,7 @@ def _get_energy(bulk_doc: dict) -> float:
     return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
 
 
-def mdecode(data: dict) -> Any:
+def mdecode(data: dict | list) -> Any:
     """Decode the data."""
     return MontyDecoder().process_decoded(data)
 

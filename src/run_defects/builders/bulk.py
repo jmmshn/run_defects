@@ -1,4 +1,4 @@
-"""Collect all the usable bulk locpot data in one place."""
+"""Collect all the usable bulk properties data in one place."""
 
 # %%
 from __future__ import annotations
@@ -9,8 +9,11 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from maggma.builders import Builder
+from maggma.builders.map_builder import MapBuilder
+from maggma.core.store import Store
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
 from pymatgen.core import Structure
+from pymatgen.entries.computed_entries import ComputedEntry
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -19,13 +22,13 @@ if TYPE_CHECKING:
     from maggma.stores import Store
 
 
-class LocpotBuilder(Builder):
+class BulkBuilder(Builder):
     """Collect all the usable bulk locpot data in one place."""
 
     def __init__(
         self,
         jobstore: JobStore,
-        locpot_store: Store,
+        bulk_store: Store,
         query: dict = None,
         ltol: float = 0.2,
         stol: float = 0.3,
@@ -36,7 +39,7 @@ class LocpotBuilder(Builder):
 
         Args:
             jobstore: The jobstore to get the locpot data from.
-            locpot_store: The store to put the locpot data in.
+            bulk_store: The store to put the locpot data in.
             query: The query to use to get the locpot data from jobstore.
             ltol: The length tolerance for the structure matcher.
             stol: The site tolerance for the structure matcher.
@@ -44,10 +47,10 @@ class LocpotBuilder(Builder):
             kwargs: Other kwargs to pass to the parent class.
         """
         self.jobstore = jobstore
-        self.locpot_store = locpot_store
+        self.bulk_store = bulk_store
         self.query = query or {}
         self.ltol, self.stol, self.angle_tol = ltol, stol, angle_tol
-        super().__init__(sources=[self.jobstore], targets=[self.locpot_store], **kwargs)
+        super().__init__(sources=[self.jobstore], targets=[self.bulk_store], **kwargs)
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
@@ -64,6 +67,7 @@ class LocpotBuilder(Builder):
             "output.calcs_reversed.calc_type",
             "output.structure",
             "output.input",
+            "output.calcs_reversed.output",
         ]
         for formula in valid_formulas:
             group = list(
@@ -99,8 +103,12 @@ class LocpotBuilder(Builder):
                 run_type2runs[doc["output"]["calcs_reversed"][0]["run_type"]].append(
                     doc["output"]
                 )
+            all_calcs = list(itertools.chain.from_iterable(run_type2runs.values()))
+            oldest_doc = min(all_calcs, key=lambda x: x["uuid"])
+            oldest_struct = oldest_doc["structure"]
             output_doc["runs"] = dict(run_type2runs)
             output_doc["task_id"] = min(uuids)
+            output_doc["structure"] = oldest_struct
             res.append(output_doc)
         return res
 
@@ -108,5 +116,38 @@ class LocpotBuilder(Builder):
         """Update the target store."""
         items = list(filter(None, itertools.chain.from_iterable(items)))
         for doc in items:
-            doc[self.locpot_store.last_updated_field] = datetime.utcnow()
-        self.locpot_store.update(items)
+            doc[self.bulk_store.last_updated_field] = datetime.utcnow()
+        self.bulk_store.update(items)
+
+
+class BandGapBuilder(MapBuilder):
+    """Get the band gap data from the bulk properties data."""
+
+    def __init__(
+        self, bulk_store: Store, bandgap_store: Store, query: dict = None, **kwargs
+    ) -> None:
+        """Init."""
+        self.bulk_store = bulk_store
+        self.bandgap_store = bandgap_store
+        super().__init__(
+            source=self.bulk_store, target=self.bandgap_store, query=query, **kwargs
+        )
+
+    def unary_function(self, item: dict) -> dict:
+        """Get the band gap data from the selected document."""
+        runs = item.pop("runs")
+        band_gaps = dict()
+        for run_type, run_list in runs.items():
+            best_run = min(run_list, key=_get_best)
+            band_gaps[run_type] = {
+                "uuid": best_run["uuid"],
+                "vbm": best_run["calcs_reversed"][0]["output"]["vbm"],
+                "cbm": best_run["calcs_reversed"][0]["output"]["cbm"],
+            }
+        item["band_gaps"] = band_gaps
+        return item
+
+
+def _get_best(bulk_doc: dict) -> float:
+    """Quantify the quality of a bulk calculation."""
+    return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
