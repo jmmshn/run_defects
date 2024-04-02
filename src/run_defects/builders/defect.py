@@ -20,6 +20,7 @@ from pymatgen.analysis.defects.thermo import (
     FormationEnergyDiagram,
     group_defect_entries,
 )
+from pymatgen.analysis.phase_diagram import PhaseDiagram
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
 from pymatgen.core import IStructure, Structure
 from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
@@ -449,6 +450,7 @@ class FormationEnergyBuilder(Builder):
         corrected_defect_entry_store: Store,
         element_store: Store,
         pd_store: Store,
+        bandgap_store: Store,
         formation_energy_store: Store,
         run_type: str,
         thermo_type: str = "GGA_GGA+U",
@@ -459,6 +461,7 @@ class FormationEnergyBuilder(Builder):
         self.corrected_defect_entry_store = corrected_defect_entry_store
         self.element_store = element_store
         self.pd_store = pd_store
+        self.bandgap_store = bandgap_store
         self.formation_energy_store = formation_energy_store
         self.run_type = run_type
         self.query = query or {}
@@ -467,6 +470,7 @@ class FormationEnergyBuilder(Builder):
             sources=[
                 self.corrected_defect_entry_store,
                 self.element_store,
+                self.bandgap_store,
                 self.pd_store,
             ],
             targets=[self.formation_energy_store],
@@ -503,34 +507,60 @@ class FormationEnergyBuilder(Builder):
                 pd_doc = self.pd_store.query_one(
                     {"chemsys": defect_chemsys, "thermo_type": self.thermo_type}
                 )
+                bandgap_docs = list(
+                    self.bandgap_store.query({"formula_pretty": bulk_formula})
+                )
                 yield {
                     "bulk_formula": bulk_formula,
                     "defect_name": defect_name,
                     "defect_chemsys": defect_chemsys,
                     "defect_entry_docs": defect_entry_docs,
                     "element_docs": element_docs,
+                    "band_gap_docs": bandgap_docs,
                     "pd_doc": pd_doc,
                 }
 
-    def process_item(self, item: dict) -> dict:
+    def process_item(self, item: dict) -> Generator:
         """Process the item."""
         pd_entries = mdecode(item["pd_doc"]["phase_diagram"]["all_entries"])
         elements = mdecode([d["stable_entry"] for d in item["element_docs"]])
         defect_entries = mdecode([d["defect_entry"] for d in item["defect_entry_docs"]])
+        bandgap_data = {
+            tuple(d["uuids"]): d["band_gaps"][self.run_type]
+            for d in item["band_gap_docs"]
+        }
 
         for _defect_name, gdents_ in group_defect_entries(defect_entries):
-            FormationEnergyDiagram.with_atomic_entries(
+            bulk_uuid = gdents_[0].bulk_entry.entry_id
+            bg_key = next(k for k in bandgap_data if bulk_uuid in k)
+            vbm, cbm = bandgap_data[bg_key]["vbm"], bandgap_data[bg_key]["cbm"]
+            pd_ = PhaseDiagram(pd_entries)
+            fed = FormationEnergyDiagram.with_atomic_entries(
                 defect_entries=gdents_,
                 atomic_entries=elements,
-                pd_entries=pd_entries,
-                vbm=0,
-                band_gap=5,
+                phase_diagram=pd_,
+                vbm=vbm,
+                band_gap=cbm - vbm,
             )
-
-        return item
+            defect_uuids = [d.entry_id for d in gdents_]
+            yield {
+                "bulk_uuid": bulk_uuid,
+                "defect_uuids": defect_uuids,
+                "task_id": min(defect_uuids),
+                "vbm": vbm,
+                "cbm": cbm,
+                "bulk_formula": item["bulk_formula"],
+                "defect_chemsys": item["defect_chemsys"],
+                "defect_name": _defect_name,
+                "fed": fed.as_dict(),
+            }
 
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
+        items = list(filter(None, itertools.chain.from_iterable(items)))
+        for doc in items:
+            doc[self.element_store.last_updated_field] = _utc()
+        self.formation_energy_store.update(items)
 
 
 @lru_cache(maxsize=200)
@@ -561,6 +591,3 @@ def _get_sc_entry(doc: dict) -> ComputedStructureEntry:
     return ComputedStructureEntry.from_dict(
         {**entry_dict, "structure": structure, "entry_id": entry_id}
     )
-
-
-# %%

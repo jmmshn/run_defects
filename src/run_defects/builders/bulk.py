@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import collections
 import itertools
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,9 @@ from maggma.builders.map_builder import MapBuilder
 from maggma.core.store import Store
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
 from pymatgen.core import Structure
-from pymatgen.entries.computed_entries import ComputedEntry
+
+azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
+azlogger.setLevel(logging.WARNING)
 
 if TYPE_CHECKING:
     from collections.abc import Generator
@@ -68,6 +71,7 @@ class BulkBuilder(Builder):
             "output.structure",
             "output.input",
             "output.calcs_reversed.output",
+            "output.calcs_reversed.input",
         ]
         for formula in valid_formulas:
             group = list(
@@ -108,6 +112,7 @@ class BulkBuilder(Builder):
             oldest_struct = oldest_doc["structure"]
             output_doc["runs"] = dict(run_type2runs)
             output_doc["task_id"] = min(uuids)
+            output_doc["uuids"] = uuids
             output_doc["structure"] = oldest_struct
             res.append(output_doc)
         return res
@@ -137,6 +142,7 @@ class BandGapBuilder(MapBuilder):
         """Get the band gap data from the selected document."""
         runs = item.pop("runs")
         band_gaps = dict()
+        uuids = []
         for run_type, run_list in runs.items():
             best_run = min(run_list, key=_get_best)
             band_gaps[run_type] = {
@@ -144,10 +150,12 @@ class BandGapBuilder(MapBuilder):
                 "vbm": best_run["calcs_reversed"][0]["output"]["vbm"],
                 "cbm": best_run["calcs_reversed"][0]["output"]["cbm"],
             }
+            uuids.extend([run["uuid"] for run in run_list])
         item["band_gaps"] = band_gaps
+        item["uuids"] = uuids
         return item
 
 
 def _get_best(bulk_doc: dict) -> float:
     """Quantify the quality of a bulk calculation."""
-    return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
+    return -bulk_doc["calcs_reversed"][0]["input"]["nkpoints"]
