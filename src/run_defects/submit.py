@@ -208,7 +208,7 @@ def get_defects(
 
 
 def get_submitted_defect_run_ids() -> set:
-    """Get the defect run ids that have been submitted."""
+    """Get the defect run ids that have been submitted to the queue."""
     submitted_dicts = list(
         LPAD.fireworks.find(
             {
