@@ -22,7 +22,7 @@ from pymatgen.analysis.defects.generators import (
     VacancyGenerator,
 )
 
-from run_defects.utils import mdecode
+from run_defects.utils import LPAD, rget
 
 VGEN = VacancyGenerator()
 IGEN = ChargeInterstitialGenerator(max_insertions=3)
@@ -69,8 +69,9 @@ DEFECT_RELAX_SC = update_user_incar_settings(
         input_set_generator=MPGGARelaxSetGenerator(use_structure_charge=True),
         task_document_kwargs={"store_volumetric_data": ["locpot"]},
     ),
-    incar_updates=INCAR_UPDATES | {"ISIF": 2, "LVHAR": True},
+    incar_updates=INCAR_UPDATES | {"ISIF": 2, "LVHAR": True, "LREAL": "Auto"},
 )
+
 DEFECT_RELAX_SC = update_user_kpoints_settings(
     DEFECT_RELAX_SC, kpoints_updates=SPECIAL_KPOINT
 )
@@ -182,9 +183,10 @@ def _get_subs(struct: Structure) -> tuple[dict[str, str], ...]:
     )
 
 
-def _get_defects(
+def get_defects(
     chgcar: VolumetricData, max_iter: int = 3
 ) -> Generator[tuple[Defect, int], None, None]:
+    """Generate the defects for a chgcar."""
     tup_el = _get_elements(chgcar.structure)
     tup_sub = _get_subs(chgcar.structure)
     for sub_d in tup_sub[:max_iter]:
@@ -205,9 +207,16 @@ def _get_defects(
             yield defect, ii
 
 
-def get_defects(bdoc: dict, max_iter: int) -> Generator:
-    """Process a bulk document with Chgcar then return the defect with job_names."""
-    chgcar = mdecode(bdoc["output"]["vasp_objects"]["chgcar"])
-    uuid = bdoc["uuid"]
-    for defect, ii in _get_defects(chgcar, max_iter):
-        yield defect, f"{uuid}-{defect.name}-{ii}"
+def get_submitted_defect_run_ids() -> set:
+    """Get the defect run ids that have been submitted."""
+    submitted_dicts = list(
+        LPAD.fireworks.find(
+            {
+                "spec._tasks.0.job.metadata.defect_run_id": {"$exists": 1},
+            },
+            projection={"spec._tasks.job.metadata.defect_run_id": True},
+        )
+    )
+    return {
+        rget(dd_, "spec._tasks.0.job.metadata.defect_run_id") for dd_ in submitted_dicts
+    }

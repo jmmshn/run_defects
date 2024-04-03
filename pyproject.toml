@@ -78,4 +78,5 @@ lint.isort.known-first-party = ["run_defects"]
 lint.isort.split-on-trailing-comma = false
 lint.extend-safe-fixes = ["TCH"]
 
-
+[tool.ruff.format]
+docstring-code-format = true

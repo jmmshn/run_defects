@@ -22,9 +22,14 @@ from pymatgen.analysis.defects.thermo import (
 )
 from pymatgen.analysis.phase_diagram import PhaseDiagram
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
-from pymatgen.core import IStructure, Structure
-from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
+from pymatgen.entries.computed_entries import (
+    Composition,
+    ComputedEntry,
+    ComputedStructureEntry,
+)
 from pymatgen.ext.matproj import MPRester
+
+from run_defects.utils import mdecode
 
 azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
 azlogger.setLevel(logging.WARNING)
@@ -51,36 +56,43 @@ DEFECT_JOB_PROPERTIES = [
     "output.entry",
     "output.calcs_reversed.run_type",
     "output.additional_json.info",
+    "metadata",
 ]
-
-
-@lru_cache(maxsize=200)
-def get_dielectric_data(istruct: IStructure) -> dict:
-    """Get the dielectric data from MP."""
-    ss = Structure.from_sites(istruct)
-    with MPRester() as mp:
-        mp_id = mp.find_structure(ss.remove_oxidation_states())
-        (data,) = mp.materials.dielectric.search(mp_id)
-    return data.model_dump()
 
 
 class DielectricBuilder(MapBuilder):
     """Grab and store the dielectric data from MP."""
 
     def __init__(
-        self, defect_entry_store: Store, dielectric_store: Store, **kwargs
+        self,
+        defect_entry_store: Store,
+        jobstore: JobStore,
+        dielectric_store: Store,
+        **kwargs,
     ) -> None:
         """Init."""
         self.defect_entry_store = defect_entry_store
         self.dielectric_store = dielectric_store
+        self.jobstore = jobstore
         super().__init__(source=defect_entry_store, target=dielectric_store, **kwargs)
+        self.sources.append(jobstore)
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
+        for doc in super().get_items():
+            bulk_uuid = doc["candidate_bulk_docs"][0]["uuid"]
+            mp_id = self.jobstore.query_one(
+                {"uuid": bulk_uuid}, properties=["metadata"]
+            )["metadata"]["material_id"]
+            yield {
+                "task_id": doc["task_id"],
+                "mp_id": mp_id,
+                "dielectric_data": _get_dielectric_data(mp_id),
+            }
 
     def unary_function(self, item: dict) -> dict:
         """Get the dielectric data."""
-        defect_entry = DefectEntry.from_dict(item["defect_entry"])
-        istruct = IStructure.from_sites(defect_entry.defect.structure)
-        dielectric_data = get_dielectric_data(istruct)
-        return {"task_id": item["task_id"], "dielectric_data": dielectric_data}
+        return item
 
 
 class DefectEntryBuilder(Builder):
@@ -108,7 +120,6 @@ class DefectEntryBuilder(Builder):
             ltol: The length tolerance for the structure matcher.
             stol: The site tolerance for the structure matcher.
             angle_tol: The angle tolerance for the structure matcher.
-            primitive_cell: Whether to use the primitive cell for the structure matcher.
             match_sc_mat: Whether to compare only with bulk SC structures.
             kwargs: Other kwargs to pass to the parent class.
         """
@@ -209,21 +220,28 @@ class DefectEntryBuilder(Builder):
                     bulk_struct = mdecode(run_doc["structure"])
                     if structure_matcher.fit(bulk_struct, ref_struct):
                         candidate_bulk_docs.append(run_doc)
-
+            bulk_uuids = [d["uuid"] for d in candidate_bulk_docs]
             elements = set(defect_entry.sc_entry.composition.elements)
             chemsys = "-".join(sorted([el.symbol for el in elements]))
-
-            yield {
-                "defect_entry": defect_entry.as_dict(),
-                "candidate_bulk_docs": candidate_bulk_docs,
-                "defect_locpot": job_doc["output"]["vasp_objects"]["locpot"],
-                "task_id": defect_entry.entry_id,
-                "defect_run_type": defect_run_type,
-                "defect_chemsys": chemsys,
-                "defect_name": defect_obj.name,
-                "bulk_formula": bulk_formula,
-                "defect": defect_obj.as_dict(),
-            }
+            if candidate_bulk_docs:
+                yield {
+                    "defect_entry": defect_entry.as_dict(),
+                    "candidate_bulk_docs": candidate_bulk_docs,
+                    "defect_locpot": job_doc["output"]["vasp_objects"]["locpot"],
+                    "task_id": defect_entry.entry_id,
+                    "defect_run_type": defect_run_type,
+                    "defect_chemsys": chemsys,
+                    "defect_name": defect_obj.name,
+                    "bulk_formula": bulk_formula,
+                    "defect": defect_obj.as_dict(),
+                    "bulk_uuids": bulk_uuids,
+                }
+            else:
+                self.logger.warning(
+                    f"No bulk structures found for {defect_obj.name} in {bulk_formula}."
+                    f"Defect Run uuid: {job_doc['uuid']}."
+                    f"Defect Run metadata: {job_doc['metadata']}."
+                )
 
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
@@ -265,7 +283,7 @@ class PDBuilder(Builder):
                 yield {
                     "chemsys": chemsys,
                     "phase_diagram": mp.thermo.get_phase_diagram_from_chemsys(
-                        "Ga-N", "GGA_GGA+U"
+                        chemsys, "GGA_GGA+U"
                     ).as_dict(),
                 }
 
@@ -392,9 +410,15 @@ class FreysoldtBuilder(MapBuilder):
         # call the parent class method
         for doc in super().get_items():
             doc_ = self._replace_blob(doc, dry_run=False)
-            doc_["dielectric_data"] = self.dielectric_store.query_one(
+            dielectric_doc = self.dielectric_store.query_one(
                 {"task_id": doc["task_id"]}
-            )["dielectric_data"]
+            )
+            if dielectric_doc is None:
+                self.logger.warning(
+                    f"Dielectric data not found for {doc['task_id']}. Skipping."
+                )
+                continue
+            doc_["dielectric_data"] = dielectric_doc["dielectric_data"]
             yield doc_
 
     def unary_function(self, item: dict) -> dict:
@@ -409,7 +433,32 @@ class FreysoldtBuilder(MapBuilder):
             bulk_locpot=bulk_locpot,
             dielectric=dielectric,
         )
-        defect_entry.bulk_entry = ComputedEntry.from_dict(bulk_doc["entry"])
+        sc_mat = get_closest_sc_mat(
+            uc_struct=bulk_locpot.structure, sc_struct=defect_locpot.structure
+        )
+        bulk_sc_composition_ = (bulk_locpot.structure * sc_mat).composition
+        bulk_doc_composition_ = Composition(bulk_doc["entry"]["composition"])
+
+        bulk_sc_fu, bulk_sc_factor = (
+            bulk_sc_composition_.get_reduced_composition_and_factor()
+        )
+        bulk_doc_fu, bulk_doc_factor = (
+            bulk_doc_composition_.get_reduced_composition_and_factor()
+        )
+        if bulk_sc_fu != bulk_doc_fu:
+            raise ValueError(f"bulk_sc_fu: {bulk_sc_fu}, bulk_doc_fu: {bulk_doc_fu}")
+
+        self.logger.info(
+            f"SC COMPOSITION: {bulk_sc_composition_}, FACTOR: {bulk_sc_factor}"
+            f"UC COMPOSITION: {bulk_doc_composition_}, FACTOR: {bulk_doc_factor}"
+        )
+        bulk_entry_dict = bulk_doc["entry"]
+        bulk_entry_dict["composition"] = bulk_sc_composition_
+        bulk_entry_dict["energy"] = bulk_doc["entry"]["energy"] * (
+            bulk_sc_factor / bulk_doc_factor
+        )
+        defect_entry.bulk_entry = ComputedEntry.from_dict(bulk_entry_dict)
+
         return {
             "freysoldt_data": correction_results.as_dict(),
             "defect_entry": defect_entry.as_dict(),
@@ -534,7 +583,16 @@ class FormationEnergyBuilder(Builder):
             bulk_uuid = gdents_[0].bulk_entry.entry_id
             bg_key = next(k for k in bandgap_data if bulk_uuid in k)
             vbm, cbm = bandgap_data[bg_key]["vbm"], bandgap_data[bg_key]["cbm"]
+            if vbm is None or cbm is None:
+                self.logger.warning(
+                    f"Band gap data not found for {bulk_uuid}. Skipping."
+                )
+                continue
             pd_ = PhaseDiagram(pd_entries)
+            self.logger.info(
+                f"Elements: {[e.composition.reduced_formula for e in elements]},"
+                " VBM: {vbm}, CBM: {cbm}"
+            )
             fed = FormationEnergyDiagram.with_atomic_entries(
                 defect_entries=gdents_,
                 atomic_entries=elements,
@@ -578,11 +636,6 @@ def _get_energy(bulk_doc: dict) -> float:
     return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
 
 
-def mdecode(data: dict | list) -> Any:
-    """Decode the data."""
-    return MontyDecoder().process_decoded(data)
-
-
 def _get_sc_entry(doc: dict) -> ComputedStructureEntry:
     """Get the ComputedStructureEntry."""
     entry_dict = doc["output"]["entry"]
@@ -591,3 +644,13 @@ def _get_sc_entry(doc: dict) -> ComputedStructureEntry:
     return ComputedStructureEntry.from_dict(
         {**entry_dict, "structure": structure, "entry_id": entry_id}
     )
+
+
+@lru_cache(maxsize=200)
+def _get_dielectric_data(mp_id: str) -> dict:
+    """Get the dielectric data from MP."""
+    with MPRester() as mp:
+        res = mp.materials.dielectric.search(mp_id)
+    if not res:
+        return None
+    return res[0].model_dump()
