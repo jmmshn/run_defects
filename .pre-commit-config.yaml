@@ -31,6 +31,6 @@ repos:
     language: python
     types: [text]
     args: [
-      --ignore-words-list, 'titel,statics,ba,nd,te,mater,commun,vise,dscribe',
+      --ignore-words-list, 'titel,statics,ba,nd,te,mater,commun,vise,dscribe,nin',
       --skip, "*.ipynb,./tests,*paper*",
       ]

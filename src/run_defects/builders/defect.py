@@ -162,7 +162,7 @@ class DefectEntryBuilder(Builder):
             bulk_formula_ = d["output"]["additional_json"]["info"]["bulk_formula"]
             defect_name_ = d["output"]["additional_json"]["info"]["defect_name"]
             defect_run_combos.add((bulk_formula_, defect_name_, run_type_))
-
+        finished_task_ids = self.defect_entry_store.distinct("task_id")
         for formula, defect_name, run_type in defect_run_combos:
             combo_query = {
                 "output.additional_json.info.bulk_formula": formula,
@@ -171,7 +171,10 @@ class DefectEntryBuilder(Builder):
             }
             ic(combo_query)
             job_docs = list(
-                self.jobstore.query(combo_query, properties=DEFECT_JOB_PROPERTIES)
+                self.jobstore.query(
+                    combo_query | {"uuid": {"$nin": finished_task_ids}},
+                    properties=DEFECT_JOB_PROPERTIES,
+                )
             )
             bulk_query = {
                 "formula_pretty": formula,
@@ -246,6 +249,7 @@ class DefectEntryBuilder(Builder):
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
         items = list(filter(None, itertools.chain.from_iterable(items)))
+        self.logger.info(f"Updating {len(items)} defect entries.")
         for doc in items:
             doc[self.defect_entry_store.last_updated_field] = _utc()
         self.defect_entry_store.update(items)

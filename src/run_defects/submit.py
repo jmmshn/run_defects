@@ -21,8 +21,9 @@ from pymatgen.analysis.defects.generators import (
     SubstitutionGenerator,
     VacancyGenerator,
 )
+from pymatgen.core import Structure
 
-from run_defects.utils import LPAD, rget
+from run_defects.utils import JOB_STORE, LPAD, rget
 
 VGEN = VacancyGenerator()
 IGEN = ChargeInterstitialGenerator(max_insertions=3)
@@ -32,8 +33,9 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
     from fireworks import LaunchPad
+    from jobflow import Maker
+    from maggma.stores import Store
     from pymatgen.analysis.defects.core import Defect
-    from pymatgen.core import Structure
     from pymatgen.io.vasp.outputs import VolumetricData
 
 INCAR_UPDATES = {
@@ -46,6 +48,15 @@ INCAR_UPDATES = {
     "ENCUT": 520,
     "ALGO": "Normal",
     "POTIM": 0.25,
+    "LORBIT": 11,
+}
+
+HSE_INCAR_UPDATES = {
+    "ALGO": "Normal",
+    "HFSCREEN": 0.2,
+    "GGA": "PE",
+    "LHFCALC": True,
+    "PRECFOCK": "Normal",
 }
 
 BULK_RELAX_UC = update_user_incar_settings(
@@ -58,6 +69,10 @@ BULK_STATIC_UC = MPGGAStaticMaker(
 
 BULK_STATIC_UC = update_user_incar_settings(
     BULK_STATIC_UC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
+)
+
+BULK_STATIC_UC_HSE = update_user_incar_settings(
+    BULK_STATIC_UC, incar_updates=HSE_INCAR_UPDATES | {"KPAR": 4, "NCORE": 1}
 )
 
 BULK_STATIC_SC = update_user_kpoints_settings(
@@ -82,6 +97,10 @@ DEFECT_STATIC_SC = MPGGAStaticMaker(
 
 DEFECT_STATIC_SC = update_user_incar_settings(
     DEFECT_STATIC_SC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
+)
+
+DEFECT_STATIC_SC_HSE = update_user_incar_settings(
+    DEFECT_STATIC_SC, incar_updates=HSE_INCAR_UPDATES | {"NCORE": 1}
 )
 
 F_MAKER_UC = FormationEnergyMaker(
@@ -127,8 +146,8 @@ def submit_flow(flow: jobflow.Flow, tag: str, lpad: LaunchPad) -> None:
 
 def get_bulk_flow(
     structure: Structure,
+    static_maker: jobflow.Maker,
     relax_maker: jobflow.Maker | None = None,
-    static_maker: jobflow.Maker | None = None,
     remove_symmetry: bool = True,
 ) -> jobflow.Flow:
     """Get the bulk workflow for a structure.
@@ -147,18 +166,23 @@ def get_bulk_flow(
     Returns:
         jobflow.Flow: bulk flow
     """
-    if relax_maker is None:
-        relax_maker = BULK_RELAX_UC
-    if static_maker is None:
-        static_maker = BULK_STATIC_UC
-
     struct_ = structure.copy()
-    struct_.remove_oxidation_states()
-    struct_.remove_site_property("magmom")
-    relax_job = relax_maker.make(struct_)
-    jobs = [relax_job]
     formula = struct_.composition.reduced_formula
-    static_job = static_maker.make(relax_job.output.structure)
+    if remove_symmetry:
+        struct_.remove_oxidation_states()
+        struct_.remove_site_property("magmom")
+
+    jobs = []
+    if relax_maker:
+        relax_job = relax_maker.make(struct_)
+        jobs.append(relax_job)
+        relax_job.name = f"{formula} static"
+        struct_out = relax_job.output.structure
+    else:
+        struct_out = struct_
+
+    static_job = static_maker.make(struct_out)
+    static_job.name = f"{formula} static"
     jobs.append(static_job)
     flow = jobflow.Flow(jobs, name=f"{formula} bulk")
     if remove_symmetry:
@@ -220,3 +244,48 @@ def get_submitted_defect_run_ids() -> set:
     return {
         rget(dd_, "spec._tasks.0.job.metadata.defect_run_id") for dd_ in submitted_dicts
     }
+
+
+def _get_completed_defects_calcs(
+    query: dict = None, jobstore: Store = None, **kwargs
+) -> Generator[dict, None, None]:
+    """Query for completed defect calculations."""
+    query = query or {}
+    js_query = {
+        "output.vasp_objects.locpot.@class": {"$exists": True},
+        "output.additional_json.info.defect_name": {"$exists": True},
+        **query,
+    }
+    properties = ["output.additional_json", "output.structure"]
+    jobstore = jobstore or JOB_STORE
+
+    for job_doc in jobstore.query(criteria=js_query, properties=properties, **kwargs):
+        defect_info = job_doc["output"]["additional_json"]["info"]
+        structure = Structure.from_dict(job_doc["output"]["structure"])
+        yield {"info": defect_info, "structure": structure}
+
+
+def _get_defect_flow_from_info(
+    maker: Maker, add_info: dict, structure: Structure
+) -> jobflow.Flow:
+    """Create the defect flow for a structure."""
+    job_ = maker.make(structure)
+    job_.update_maker_kwargs(
+        {"_set": {"write_additional_data->info:json": add_info}}, dict_mod=True
+    )
+    return job_
+
+
+def get_defect_sc_from_completed(
+    maker: Maker, query: dict = None, jobstore: Store = None, **kwargs
+) -> Generator[dict, None, None]:
+    """Query for completed GGA calculations and rerun them.
+
+    Args:
+        maker (Maker): maker for the defect calculations
+        query (dict, optional): query for the defect calculations. Defaults to None.
+        jobstore (Store, optional): jobstore to query. Defaults to None.
+        **kwargs: additional kwargs for the query.
+    """
+    for dd_ in _get_completed_defects_calcs(query=query, jobstore=jobstore, **kwargs):
+        yield _get_defect_flow_from_info(maker, dd_["info"], dd_["structure"])
