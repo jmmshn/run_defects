@@ -9,7 +9,6 @@ import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
-from icecream import ic
 from maggma.builders import Builder
 from maggma.builders.map_builder import MapBuilder
 from maggma.core import Store
@@ -33,6 +32,8 @@ from run_defects.utils import mdecode
 
 azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
 azlogger.setLevel(logging.WARNING)
+pmglogger = logging.getLogger("pymatgen.core.structure")
+pmglogger.setLevel(logging.ERROR)
 
 
 def _utc() -> datetime.datetime:
@@ -128,8 +129,6 @@ class DefectEntryBuilder(Builder):
         self.defect_entry_store = defect_entry_store
         self.query = query or {}
         self.match_sc_mat = match_sc_mat
-        self.get_bulk_sc = match_sc_mat
-        self._primitive_cell = not self.get_bulk_sc
         (
             self.ltol,
             self.stol,
@@ -145,49 +144,102 @@ class DefectEntryBuilder(Builder):
             **kwargs,
         )
 
+    @property
+    def _primitive_cell(self) -> bool:
+        return not self.match_sc_mat
+
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
         j_query = {**DEFECT_JOB_QUERY, **self.query}
+        # get groups of uuids with the same bulk formula and defect name
+        agg_pipe = self.jobstore.docs_store._collection.aggregate(
+            [
+                {"$match": j_query},
+                {
+                    "$group": {
+                        "_id": {
+                            "name": "$output.additional_json.info.defect_name",
+                            "bulk_formula": "$output.additional_json.info.bulk_formula",
+                        },
+                        "uuids": {"$addToSet": "$uuid"},
+                    }
+                },
+            ]
+        )
+        finished_task_ids = set(self.defect_entry_store.distinct("task_id"))
+        agg_results = list(agg_pipe)
+        self.total = len(agg_results)
+        self.logger.info(
+            f"Found {self.total} groups (defect_name + bulk_formula) to process."
+        )
+        for group in agg_results:
+            # `_id` contains keys `name` and `bulk`
+            # `uuids` contains a list of uuids
+            if finished_task_ids.issuperset(group["uuids"]):
+                continue
 
-        defect_run_combos = set()
-        for d in self.jobstore.query(
-            j_query,
-            properties=[
-                "output.additional_json.info.defect_name",
-                "output.additional_json.info.bulk_formula",
-                "output.calcs_reversed.run_type",
-            ],
-        ):
-            run_type_ = d["output"]["calcs_reversed"][0]["run_type"]
-            bulk_formula_ = d["output"]["additional_json"]["info"]["bulk_formula"]
-            defect_name_ = d["output"]["additional_json"]["info"]["defect_name"]
-            defect_run_combos.add((bulk_formula_, defect_name_, run_type_))
-        finished_task_ids = self.defect_entry_store.distinct("task_id")
-        for formula, defect_name, run_type in defect_run_combos:
-            combo_query = {
-                "output.additional_json.info.bulk_formula": formula,
-                "output.additional_json.info.defect_name": defect_name,
-                "output.calcs_reversed.run_type": run_type,
-            }
-            ic(combo_query)
+            missing_uuids = list(set(group["uuids"]) - finished_task_ids)
+            self.logger.info(
+                f"Processing {len(missing_uuids)}) missing uuids for group: "
+                "{group['_id']}"
+            )
+            formula = group["_id"]["bulk_formula"]
+            defect_name = group["_id"]["name"]
             job_docs = list(
                 self.jobstore.query(
-                    combo_query | {"uuid": {"$nin": finished_task_ids}},
+                    {"uuid": {"$in": missing_uuids}},
                     properties=DEFECT_JOB_PROPERTIES,
                 )
             )
             bulk_query = {
                 "formula_pretty": formula,
-                f"runs.{run_type}": {"$exists": True},
             }
             bulk_docs = list(self.bulk_store.query(bulk_query))
             yield {
                 "formula": formula,
                 "defect_name": defect_name,
-                "run_type": run_type,
                 "job_docs": job_docs,
-                "locpot_docs": bulk_docs,
+                "bulk_docs": bulk_docs,
             }
+
+        # import ipdb; ipdb.set_trace()
+        # for d in self.jobstore.query(
+        #     j_query,
+        #     properties=[
+        #         "output.additional_json.info.defect_name",
+        #         "output.additional_json.info.bulk_formula",
+        #         "output.calcs_reversed.run_type",
+        #     ],
+        # ):
+        #     run_type_ = d["output"]["calcs_reversed"][0]["run_type"]
+        #     bulk_formula_ = d["output"]["additional_json"]["info"]["bulk_formula"]
+        #     defect_name_ = d["output"]["additional_json"]["info"]["defect_name"]
+        #     defect_run_combos.add((bulk_formula_, defect_name_, run_type_))
+        # finished_task_ids = self.defect_entry_store.distinct("task_id")
+        # for formula, defect_name, run_type in defect_run_combos:
+        #     combo_query = {
+        #         "output.additional_json.info.bulk_formula": formula,
+        #         "output.additional_json.info.defect_name": defect_name,
+        #         "output.calcs_reversed.run_type": run_type,
+        #     }
+        #     job_docs = list(
+        #         self.jobstore.query(
+        #             combo_query | {"uuid": {"$nin": finished_task_ids}},
+        #             properties=DEFECT_JOB_PROPERTIES,
+        #         )
+        #     )
+        #     bulk_query = {
+        #         "formula_pretty": formula,
+        #         f"runs.{run_type}": {"$exists": True},
+        #     }
+        #     bulk_docs = list(self.bulk_store.query(bulk_query))
+        #     yield {
+        #         "formula": formula,
+        #         "defect_name": defect_name,
+        #         "run_type": run_type,
+        #         "job_docs": job_docs,
+        #         "locpot_docs": bulk_docs,
+        #     }
 
     def process_item(self, item: dict) -> Generator:
         """Process the item."""
@@ -205,7 +257,7 @@ class DefectEntryBuilder(Builder):
             defect_run_type = job_doc["output"]["calcs_reversed"][0]["run_type"]
             defect_sc_struct = mdecode(job_doc["output"]["structure"])
             ref_struct = defect_obj.structure
-            if self.get_bulk_sc:
+            if self.match_sc_mat:
                 sc_mat = get_closest_sc_mat(
                     uc_struct=defect_obj.structure, sc_struct=defect_sc_struct
                 )
@@ -216,10 +268,20 @@ class DefectEntryBuilder(Builder):
                 charge_state=charge_state,
                 sc_entry=_get_sc_entry(job_doc),
             )
+
+            if int(defect_entry.charge_state) != int(
+                defect_entry.sc_entry.structure._charge
+            ):
+                raise ValueError(
+                    f"Defect OBJ charge state ({int(defect_entry.charge_state)}) "
+                    "does not match structure charge "
+                    f"({int(defect_entry.sc_entry.structure._charge)})\n"
+                    f"UUID: {job_doc['uuid']}\n"
+                )
             candidate_bulk_docs = []
             bulk_formula = item["formula"]
-            for locpot_doc in item["locpot_docs"]:
-                for run_doc in locpot_doc["runs"][defect_run_type]:
+            for bulk_doc in item["bulk_docs"]:
+                for run_doc in bulk_doc["runs"][defect_run_type]:
                     bulk_struct = mdecode(run_doc["structure"])
                     if structure_matcher.fit(bulk_struct, ref_struct):
                         candidate_bulk_docs.append(run_doc)
@@ -241,9 +303,11 @@ class DefectEntryBuilder(Builder):
                 }
             else:
                 self.logger.warning(
-                    f"No bulk structures found for {defect_obj.name} in {bulk_formula}."
-                    f"Defect Run uuid: {job_doc['uuid']}."
-                    f"Defect Run metadata: {job_doc['metadata']}."
+                    f"No bulk structures found for {defect_obj.name} "
+                    "in {bulk_formula}.\n"
+                    f"Defect Run uuid: {job_doc['uuid']}.\n"
+                    f"Defect Run metadata: {job_doc['metadata']}.\n"
+                    f"defect_run_type: {defect_run_type}.\n"
                 )
 
     def update_targets(self, items: dict | list) -> None:
@@ -505,7 +569,6 @@ class FormationEnergyBuilder(Builder):
         pd_store: Store,
         bandgap_store: Store,
         formation_energy_store: Store,
-        run_type: str,
         thermo_type: str = "GGA_GGA+U",
         query: dict = None,
         **kwargs,
@@ -516,7 +579,6 @@ class FormationEnergyBuilder(Builder):
         self.pd_store = pd_store
         self.bandgap_store = bandgap_store
         self.formation_energy_store = formation_energy_store
-        self.run_type = run_type
         self.query = query or {}
         self.thermo_type = thermo_type
         super().__init__(
@@ -532,46 +594,67 @@ class FormationEnergyBuilder(Builder):
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
-        defect_ent_query = {"defect_run_type": self.run_type, **self.query}
-        bulk_formulas = self.corrected_defect_entry_store.distinct(
-            "bulk_formula", defect_ent_query
+        agg_pipe = self.corrected_defect_entry_store._collection.aggregate(
+            [
+                {"$match": self.query},
+                {
+                    "$group": {
+                        "_id": {
+                            "defect_run_type": "$defect_run_type",
+                            "bulk_formula": "$bulk_formula",
+                            "defect_name": "$defect_name",
+                        },
+                        "task_ids": {"$addToSet": "$task_id"},
+                    }
+                },
+            ]
         )
-        for bulk_formula in bulk_formulas:
-            defect_names = self.corrected_defect_entry_store.distinct(
-                "defect_name", {"bulk_formula": bulk_formula, **defect_ent_query}
+        agg_results = list(agg_pipe)
+        self.total = len(agg_results)
+        self.logger.info(
+            f"Found {self.total} groups (defect_run_type + bulk_formula) to process."
+        )
+        for group in agg_results:
+            bulk_formula = group["_id"]["bulk_formula"]
+            defect_name = group["_id"]["defect_name"]
+            defect_uuids = group["task_ids"]
+            run_type = group["_id"]["defect_run_type"]
+            completed_uuids = self.formation_energy_store.distinct(
+                "task_id", {"task_id": {"$in": defect_uuids}}
             )
-            for defect_name in defect_names:
-                defect_entry_docs = list(
-                    self.corrected_defect_entry_store.query(
-                        {
-                            "bulk_formula": bulk_formula,
-                            "defect_name": defect_name,
-                            **defect_ent_query,
-                        }
-                    )
+            if set(defect_uuids) == set(completed_uuids):
+                continue
+            self.logger.info(
+                f"Getting ({len(defect_uuids)}) uuids for group: {group['_id']}"
+            )
+            defect_entry_docs = list(
+                self.corrected_defect_entry_store.query(
+                    {"task_id": {"$in": defect_uuids}}
                 )
-                defect_chemsys = defect_entry_docs[0]["defect_chemsys"]
-                elements = list(set(defect_chemsys.split("-")))
-                element_docs = list(
-                    self.element_store.query(
-                        {"chemsys": {"$in": elements}, "run_type": self.run_type}
-                    )
+            )
+            defect_chemsys = defect_entry_docs[0]["defect_chemsys"]
+            elements = list(set(defect_chemsys.split("-")))
+            element_docs = list(
+                self.element_store.query(
+                    {"chemsys": {"$in": elements}, "run_type": run_type}
                 )
-                pd_doc = self.pd_store.query_one(
-                    {"chemsys": defect_chemsys, "thermo_type": self.thermo_type}
-                )
-                bandgap_docs = list(
-                    self.bandgap_store.query({"formula_pretty": bulk_formula})
-                )
-                yield {
-                    "bulk_formula": bulk_formula,
-                    "defect_name": defect_name,
-                    "defect_chemsys": defect_chemsys,
-                    "defect_entry_docs": defect_entry_docs,
-                    "element_docs": element_docs,
-                    "band_gap_docs": bandgap_docs,
-                    "pd_doc": pd_doc,
-                }
+            )
+            pd_doc = self.pd_store.query_one(
+                {"chemsys": defect_chemsys, "thermo_type": self.thermo_type}
+            )
+            bandgap_docs = list(
+                self.bandgap_store.query({"formula_pretty": bulk_formula})
+            )
+            yield {
+                "bulk_formula": bulk_formula,
+                "defect_name": defect_name,
+                "defect_chemsys": defect_chemsys,
+                "defect_entry_docs": defect_entry_docs,
+                "element_docs": element_docs,
+                "band_gap_docs": bandgap_docs,
+                "pd_doc": pd_doc,
+                "run_type": run_type,
+            }
 
     def process_item(self, item: dict) -> Generator:
         """Process the item."""
@@ -579,7 +662,7 @@ class FormationEnergyBuilder(Builder):
         elements = mdecode([d["stable_entry"] for d in item["element_docs"]])
         defect_entries = mdecode([d["defect_entry"] for d in item["defect_entry_docs"]])
         bandgap_data = {
-            tuple(d["uuids"]): d["band_gaps"][self.run_type]
+            tuple(d["uuids"]): d["band_gaps"][item["run_type"]]
             for d in item["band_gap_docs"]
         }
 
@@ -615,6 +698,7 @@ class FormationEnergyBuilder(Builder):
                 "defect_chemsys": item["defect_chemsys"],
                 "defect_name": _defect_name,
                 "fed": fed.as_dict(),
+                "run_type": item["run_type"],
             }
 
     def update_targets(self, items: dict | list) -> None:

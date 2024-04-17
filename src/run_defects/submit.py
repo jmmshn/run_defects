@@ -6,6 +6,7 @@ import itertools
 from typing import TYPE_CHECKING
 
 import jobflow
+from atomate2.common.jobs.defect import check_charge_state
 from atomate2.vasp.flows.defect import FormationEnergyMaker
 from atomate2.vasp.flows.mp import MPGGADoubleRelaxMaker, MPGGAStaticMaker
 from atomate2.vasp.jobs.mp import MPGGARelaxMaker
@@ -14,7 +15,7 @@ from atomate2.vasp.powerups import (
     update_user_kpoints_settings,
 )
 from atomate2.vasp.sets.defect import SPECIAL_KPOINT
-from atomate2.vasp.sets.mp import MPGGARelaxSetGenerator
+from atomate2.vasp.sets.mp import MPGGARelaxSetGenerator, MPGGAStaticSetGenerator
 from jobflow.managers.fireworks import flow_to_workflow
 from pymatgen.analysis.defects.generators import (
     ChargeInterstitialGenerator,
@@ -22,6 +23,7 @@ from pymatgen.analysis.defects.generators import (
     VacancyGenerator,
 )
 from pymatgen.core import Structure
+from tqdm import tqdm
 
 from run_defects.utils import JOB_STORE, LPAD, rget
 
@@ -72,7 +74,9 @@ BULK_STATIC_UC = update_user_incar_settings(
 )
 
 BULK_STATIC_UC_HSE = update_user_incar_settings(
-    BULK_STATIC_UC, incar_updates=HSE_INCAR_UPDATES | {"KPAR": 4, "NCORE": 1}
+    BULK_STATIC_UC,
+    incar_updates=HSE_INCAR_UPDATES
+    | {"KPAR": 4, "NCORE": 1, "LREAL": False, "LMAXMIX": 6},
 )
 
 BULK_STATIC_SC = update_user_kpoints_settings(
@@ -92,11 +96,17 @@ DEFECT_RELAX_SC = update_user_kpoints_settings(
 )
 
 DEFECT_STATIC_SC = MPGGAStaticMaker(
+    input_set_generator=MPGGAStaticSetGenerator(use_structure_charge=True),
     task_document_kwargs={"store_volumetric_data": ["locpot"]},
 )
 
 DEFECT_STATIC_SC = update_user_incar_settings(
-    DEFECT_STATIC_SC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
+    DEFECT_STATIC_SC,
+    incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False, "LMAXMIX": 6},
+)
+
+DEFECT_STATIC_SC = update_user_kpoints_settings(
+    DEFECT_STATIC_SC, kpoints_updates=SPECIAL_KPOINT
 )
 
 DEFECT_STATIC_SC_HSE = update_user_incar_settings(
@@ -258,10 +268,19 @@ def _get_completed_defects_calcs(
     }
     properties = ["output.additional_json", "output.structure"]
     jobstore = jobstore or JOB_STORE
-
-    for job_doc in jobstore.query(criteria=js_query, properties=properties, **kwargs):
+    ndocs = jobstore.count(js_query)
+    for job_doc in tqdm(
+        jobstore.query(criteria=js_query, properties=properties, **kwargs), total=ndocs
+    ):
         defect_info = job_doc["output"]["additional_json"]["info"]
         structure = Structure.from_dict(job_doc["output"]["structure"])
+        charge_state = defect_info["charge_state"]
+        structure_charge = structure._charge
+        if int(charge_state) != int(structure_charge):
+            raise ValueError(
+                f"Defect OBJ charge state ({int(charge_state)}) "
+                "does not match structure charge ({int(structure_charge)})"
+            )
         yield {"info": defect_info, "structure": structure}
 
 
@@ -269,14 +288,21 @@ def _get_defect_flow_from_info(
     maker: Maker, add_info: dict, structure: Structure
 ) -> jobflow.Flow:
     """Create the defect flow for a structure."""
+    structure = structure.copy()
+    charge_state = add_info["charge_state"]
+    structure._charge = charge_state
     job_ = maker.make(structure)
+    if not maker.input_set_generator.use_structure_charge:
+        raise ValueError("Maker must use structure charge")
     job_.update_maker_kwargs(
         {"_set": {"write_additional_data->info:json": add_info}}, dict_mod=True
     )
-    return job_
+    job_.name = f"{add_info['bulk_formula']} {add_info['defect_name']}"
+    check_job = check_charge_state(charge_state, job_.output.structure)
+    return jobflow.Flow([job_, check_job], name=job_.name)
 
 
-def get_defect_sc_from_completed(
+def get_defect_sc_job_from_completed(
     maker: Maker, query: dict = None, jobstore: Store = None, **kwargs
 ) -> Generator[dict, None, None]:
     """Query for completed GGA calculations and rerun them.
