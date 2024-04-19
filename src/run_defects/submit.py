@@ -25,7 +25,7 @@ from pymatgen.analysis.defects.generators import (
 from pymatgen.core import Structure
 from tqdm import tqdm
 
-from run_defects.utils import JOB_STORE, LPAD, rget
+from run_defects.utils import JOB_STORE, LPAD, ComboMaker, rget
 
 VGEN = VacancyGenerator()
 IGEN = ChargeInterstitialGenerator(max_insertions=3)
@@ -94,11 +94,13 @@ DEFECT_RELAX_SC = update_user_incar_settings(
 DEFECT_RELAX_SC = update_user_kpoints_settings(
     DEFECT_RELAX_SC, kpoints_updates=SPECIAL_KPOINT
 )
+DEFECT_RELAX_SC.name = "defect relax"
 
 DEFECT_STATIC_SC = MPGGAStaticMaker(
     input_set_generator=MPGGAStaticSetGenerator(use_structure_charge=True),
     task_document_kwargs={"store_volumetric_data": ["locpot"]},
 )
+DEFECT_STATIC_SC.name = "defect static"
 
 DEFECT_STATIC_SC = update_user_incar_settings(
     DEFECT_STATIC_SC,
@@ -112,6 +114,7 @@ DEFECT_STATIC_SC = update_user_kpoints_settings(
 DEFECT_STATIC_SC_HSE = update_user_incar_settings(
     DEFECT_STATIC_SC, incar_updates=HSE_INCAR_UPDATES | {"NCORE": 1}
 )
+DEFECT_STATIC_SC_HSE.name = "defect static HSE"
 
 F_MAKER_UC = FormationEnergyMaker(
     defect_relax_maker=DEFECT_RELAX_SC,
@@ -124,6 +127,15 @@ F_MAKER_UC = FormationEnergyMaker(
 F_MAKER_SC = FormationEnergyMaker(
     defect_relax_maker=DEFECT_RELAX_SC,
     uc_bulk=False,
+    perturb=0.2,
+    collect_defect_entry_data=False,
+    relax_radius="auto",
+)
+
+COMBO_MAKER = ComboMaker([DEFECT_RELAX_SC, DEFECT_STATIC_SC, DEFECT_STATIC_SC_HSE])
+F_MAKER_COMBO = FormationEnergyMaker(
+    defect_relax_maker=COMBO_MAKER,
+    uc_bulk=True,
     perturb=0.2,
     collect_defect_entry_data=False,
     relax_radius="auto",
@@ -158,6 +170,7 @@ def get_bulk_flow(
     structure: Structure,
     static_maker: jobflow.Maker,
     relax_maker: jobflow.Maker | None = None,
+    additional_maker: jobflow.Maker | None = None,
     remove_symmetry: bool = True,
 ) -> jobflow.Flow:
     """Get the bulk workflow for a structure.
@@ -172,6 +185,7 @@ def get_bulk_flow(
             Defaults to None.
         remove_symmetry (bool, optional): remove symmetry from the structure.
             Defaults to True.
+        additional_maker (jobflow.Maker, optional): additional maker for the flow.
 
     Returns:
         jobflow.Flow: bulk flow
@@ -194,6 +208,10 @@ def get_bulk_flow(
     static_job = static_maker.make(struct_out)
     static_job.name = f"{formula} static"
     jobs.append(static_job)
+    if additional_maker:
+        add_job = additional_maker.make(struct_out)
+        jobs.append(add_job)
+
     flow = jobflow.Flow(jobs, name=f"{formula} bulk")
     if remove_symmetry:
         magmom_vals = {el: 0.6 for el in map(str, struct_.elements)}

@@ -4,14 +4,35 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jobflow
 from fireworks import LaunchPad
 from monty.json import MontyDecoder
 from monty.serialization import loadfn
 
+if TYPE_CHECKING:
+    from pymatgen.core import Structure
+
 logger = logging.getLogger(__name__)
+
+
+class ComboMaker(jobflow.Maker):
+    """Combine multiple makers into a single maker."""
+
+    def __init__(self, makers: jobflow.Maker) -> None:
+        """Init."""
+        self.makers = makers
+
+    def make(self, structure: Structure) -> jobflow.Job:
+        """Make the job."""
+        prv_struct = structure
+        jobs = []
+        for maker in self.makers:
+            job = maker.make(prv_struct)
+            jobs.append(job)
+            prv_struct = job.output.structure
+        return jobflow.Flow(jobs)
 
 
 def mdecode(data: dict | list) -> Any:
