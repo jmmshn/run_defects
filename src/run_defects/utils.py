@@ -27,11 +27,13 @@ class ComboMaker(jobflow.Maker):
     def make(self, structure: Structure) -> jobflow.Job:
         """Make the job."""
         prv_struct = structure
+        prev_dir = None
         jobs = []
         for maker in self.makers:
-            job = maker.make(prv_struct)
+            job = maker.make(prv_struct, prev_dir=prev_dir)
             jobs.append(job)
             prv_struct = job.output.structure
+            prev_dir = job.output.dir_name
         return jobflow.Flow(jobs, output=jobs[-1].output)
 
 
