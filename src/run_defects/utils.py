@@ -32,7 +32,7 @@ class ComboMaker(jobflow.Maker):
             job = maker.make(prv_struct)
             jobs.append(job)
             prv_struct = job.output.structure
-        return jobflow.Flow(jobs)
+        return jobflow.Flow(jobs, output=jobs[-1].output)
 
 
 def mdecode(data: dict | list) -> Any:
