@@ -51,6 +51,7 @@ INCAR_UPDATES = {
     "ALGO": "Normal",
     "POTIM": 0.25,
     "LORBIT": 11,
+    "NCORE": 4,
 }
 
 HSE_INCAR_UPDATES = {
@@ -99,12 +100,14 @@ DEFECT_RELAX_SC.name = "defect relax"
 DEFECT_STATIC_SC = MPGGAStaticMaker(
     input_set_generator=MPGGAStaticSetGenerator(use_structure_charge=True),
     task_document_kwargs={"store_volumetric_data": ["locpot"]},
+    copy_vasp_kwargs={"additional_vasp_files": ("WAVECAR",)},
 )
 DEFECT_STATIC_SC.name = "defect static"
 
 DEFECT_STATIC_SC = update_user_incar_settings(
     DEFECT_STATIC_SC,
-    incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False, "LMAXMIX": 6},
+    incar_updates=INCAR_UPDATES
+    | {"LVHAR": True, "LREAL": False, "LMAXMIX": 6, "LWAVE": True},
 )
 
 DEFECT_STATIC_SC = update_user_kpoints_settings(
