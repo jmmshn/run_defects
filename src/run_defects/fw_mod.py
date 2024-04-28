@@ -8,12 +8,12 @@ from typing import TYPE_CHECKING
 
 from fireworks import LaunchPad
 from monty.json import MontyDecoder, jsanitize
+from pymatgen.core import Structure
 from pymatgen.io.vasp.inputs import Incar, Poscar
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-    from pymatgen.core import Structure
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +83,8 @@ def _read_contcar(dir_name: str) -> Poscar:
     try:
         contcar_file = next(sub_dir.glob("CONTCAR*"))
         contcar = Poscar.from_file(contcar_file)
-    except Exception as e:
-        raise RuntimeError(f"Could not read CONTCAR from {dir_name}") from e
+    except Exception:
+        contcar = Poscar.from_file(sub_dir / "POSCAR")
     return contcar
 
 
@@ -231,5 +231,7 @@ def get_charged_structure(fw_id: int, lpad: LaunchPad = None) -> Structure:
     old_struct = MontyDecoder().process_decoded(
         fw_dict["spec"]["_tasks"][0]["job"]["function_args"][0]
     )
+    if not isinstance(old_struct, Structure):
+        raise TypeError("Check that the arg is parsed correctly")
     structure._charge = old_struct._charge  # : SLF001
     return structure

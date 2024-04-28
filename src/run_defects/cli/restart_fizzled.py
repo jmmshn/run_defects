@@ -49,9 +49,6 @@ logging.basicConfig(level=logging.INFO)
 
 
 # %%
-
-
-# %%
 @click.command()
 @click.option("-q", "--query", default={})
 @click.option("-d", "--dry-run", is_flag=True, show_default=True, default=False)
@@ -84,6 +81,7 @@ def main(
             if ibrion_swap:
                 _swap_val = {1: 2, 2: 1, 3: 1}
                 incar_update_dict["IBRION"] = _swap_val[incar["IBRION"]]
+
             update_incar_settings(fw_id, incar_update_dict, dry_run=False)
             LPAD.rerun_fw(fw_id)
 
