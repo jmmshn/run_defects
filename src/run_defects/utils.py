@@ -10,6 +10,7 @@ import jobflow
 from fireworks import LaunchPad
 from monty.json import MontyDecoder
 from monty.serialization import loadfn
+from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
 
 if TYPE_CHECKING:
     from pymatgen.core import Structure
@@ -79,3 +80,25 @@ if defect_jobstore_path is None:
 else:
     logger.info(f"DEFECT_JOBSTORE set to {defect_jobstore_path}")
     JOB_STORE = loadfn(defect_jobstore_path)
+
+
+def jdoc_to_entry(
+    doc: dict, inc_structure: bool = False
+) -> ComputedStructureEntry | ComputedEntry:
+    """Get the entry from a job doc.
+
+    Args:
+        doc: job doc
+        inc_structure: include the structure
+
+    Returns:
+        ComputedStructureEntry | ComputedEntry
+    """
+    entry_dict = doc["output"]["entry"]
+    entry_id = doc["uuid"]
+    if inc_structure:
+        structure = mdecode(doc["output"]["structure"])
+        return ComputedStructureEntry.from_dict(
+            {**entry_dict, "structure": structure, "entry_id": entry_id}
+        )
+    return ComputedEntry.from_dict({**entry_dict, "entry_id": entry_id})

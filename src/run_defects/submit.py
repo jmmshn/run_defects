@@ -46,7 +46,7 @@ INCAR_UPDATES = {
     "NELMIN": 5,
     "ISMEAR": 0,
     "SIGMA": 0.05,
-    "NELM": 300,
+    "NELM": 100,
     "ENCUT": 520,
     "ALGO": "Normal",
     "POTIM": 0.25,
@@ -55,7 +55,8 @@ INCAR_UPDATES = {
 }
 
 HSE_INCAR_UPDATES = {
-    "ALGO": "Normal",
+    "ALGO": "Damped",
+    "TIME": 0.5,
     "HFSCREEN": 0.2,
     "GGA": "PE",
     "LHFCALC": True,
@@ -63,7 +64,11 @@ HSE_INCAR_UPDATES = {
 }
 
 BULK_RELAX_UC = update_user_incar_settings(
-    MPGGADoubleRelaxMaker(), incar_updates=INCAR_UPDATES
+    MPGGADoubleRelaxMaker(), incar_updates=INCAR_UPDATES | {"KPAR": 2}
+)
+
+BULK_RELAX_SC = update_user_kpoints_settings(
+    BULK_RELAX_UC, kpoints_updates=SPECIAL_KPOINT
 )
 
 BULK_STATIC_UC = MPGGAStaticMaker(
@@ -71,7 +76,8 @@ BULK_STATIC_UC = MPGGAStaticMaker(
 )
 
 BULK_STATIC_UC = update_user_incar_settings(
-    BULK_STATIC_UC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
+    BULK_STATIC_UC,
+    incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False, "KPAR": 4},
 )
 
 BULK_STATIC_UC_HSE = update_user_incar_settings(
@@ -129,7 +135,7 @@ F_MAKER_UC = FormationEnergyMaker(
 
 F_MAKER_SC = FormationEnergyMaker(
     defect_relax_maker=DEFECT_RELAX_SC,
-    uc_bulk=False,
+    uc_bulk=True,
     perturb=0.2,
     collect_defect_entry_data=False,
     relax_radius="auto",
@@ -336,3 +342,8 @@ def get_defect_sc_job_from_completed(
     """
     for dd_ in _get_completed_defects_calcs(query=query, jobstore=jobstore, **kwargs):
         yield _get_defect_flow_from_info(maker, dd_["info"], dd_["structure"])
+
+
+def chunker(seq: list, size: int) -> Generator:
+    """Chunk a sequence into chunks of size."""
+    return (seq[pos : pos + size] for pos in range(0, len(seq), size))
