@@ -13,7 +13,11 @@ if TYPE_CHECKING:
     from pymatgen.entries.computed_entries import ComputedEntry, ComputedStructureEntry
 
 RUNTYPE = {"hse06": "HSE06", "gga": {"$in": ["GGA", "GGA+U"]}}
-TASKTYPE = {"relax": "Structure Optimization", "static": "Static"}
+TASKTYPE = {
+    "relax": "Structure Optimization",
+    "static": "Static",
+    "deformation": "Deformation",
+}
 
 
 def get_structure_with_volumetric_data(
@@ -41,9 +45,11 @@ def get_outputs(
     run_type: str = None,
     task_type: str = None,
     jobstore: JobStore = None,
+    query: dict = None,
 ) -> Generator[dict, None, None]:
     """Get the output for a formula and run type."""
-    query_: dict = {"output.formula_pretty": formula}
+    query_ = query or {}
+    query_["output.formula_pretty"] = formula
     if run_type:
         query_["output.calcs_reversed.0.run_type"] = RUNTYPE[run_type]
     if task_type:
