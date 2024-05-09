@@ -342,12 +342,20 @@ class PDBuilder(Builder):
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
         all_chemsys = self.defect_entry_store.distinct("defect_chemsys")
+        all_chemsys_and_type = self.pd_store.distinct("chemsys_and_type")
         for chemsys in all_chemsys:
+            if f"{chemsys}:{self.thermo_type}" in all_chemsys_and_type:
+                continue
             with MPRester() as mp:
                 try:
-                    pd_mp = mp.thermo.get_phase_diagram_from_chemsys(
-                        chemsys, "GGA_GGA+U"
+                    pd_entries = mp.get_entries_in_chemsys(
+                        chemsys,
+                        additional_criteria={
+                            "energy_above_hull": (0.0, 0.1),
+                            "thermo_types": [self.thermo_type],
+                        },
                     )
+                    pd_mp = PhaseDiagram(pd_entries)
                 except Exception as e:
                     self.logger.warning(f"Error getting PD for {chemsys}: {e}")
                     continue
@@ -369,6 +377,7 @@ class PDBuilder(Builder):
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
         items = list(filter(None, items))
+        self.logger.info(f"Updating {len(items)} phase diagrams.")
         for doc in items:
             doc[self.pd_store.last_updated_field] = _utc()
         self.pd_store.update(items)
