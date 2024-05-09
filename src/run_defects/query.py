@@ -66,12 +66,17 @@ def get_entries(
     task_type: str = None,
     jobstore: JobStore = None,
     inc_structures: bool = False,
+    query: dict = None,
 ) -> list[ComputedEntry | ComputedStructureEntry]:
     """Get the output for a formula and run type."""
     return [
         jdoc_to_entry(doc_, inc_structure=inc_structures)
         for doc_ in get_outputs(
-            formula=formula, run_type=run_type, task_type=task_type, jobstore=jobstore
+            formula=formula,
+            run_type=run_type,
+            task_type=task_type,
+            jobstore=jobstore,
+            query=query,
         )
     ]
 
@@ -82,6 +87,7 @@ def get_min_energy_entry(
     task_type: str = None,
     jobstore: JobStore = None,
     inc_structures: bool = False,
+    query: dict = None,
 ) -> ComputedEntry | ComputedStructureEntry:
     """Get the minimum energy entry for a formula and run type."""
     entries = get_entries(
@@ -90,5 +96,6 @@ def get_min_energy_entry(
         task_type=task_type,
         jobstore=jobstore,
         inc_structures=inc_structures,
+        query=query,
     )
     return min(entries, key=lambda x: x.energy_per_atom)
