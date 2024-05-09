@@ -345,6 +345,7 @@ class PDBuilder(Builder):
         all_chemsys_and_type = self.pd_store.distinct("chemsys_and_type")
         for chemsys in all_chemsys:
             if f"{chemsys}:{self.thermo_type}" in all_chemsys_and_type:
+                self.logger.info(f"Skipping {chemsys} for {self.thermo_type}")
                 continue
             with MPRester() as mp:
                 try:
@@ -606,7 +607,14 @@ class FormationEnergyBuilder(Builder):
         """Get the items to process."""
         agg_pipe = self.corrected_defect_entry_store._collection.aggregate(
             [
-                {"$match": self.query},
+                {
+                    "$match": {
+                        "defect_name": {"$exists": 1},
+                        "bulk_formula": {"$exists": 1},
+                        "defect_run_type": {"$exists": 1},
+                        **self.query,
+                    }
+                },
                 {
                     "$group": {
                         "_id": {
