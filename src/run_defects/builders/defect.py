@@ -78,9 +78,15 @@ class DielectricBuilder(MapBuilder):
         """Get the items to process."""
         for doc in super().get_items():
             bulk_uuid = doc["candidate_bulk_docs"][0]["uuid"]
-            mp_id = self.jobstore.query_one(
+            mp_doc_ = self.jobstore.query_one(
                 {"uuid": bulk_uuid}, properties=["metadata"]
-            )["metadata"]["material_id"]
+            )
+            if mp_doc_ is None:
+                continue
+            mp_id = mp_doc_["metadata"]["material_id"]
+            de_data = _get_dielectric_data(mp_id)
+            if de_data is None:
+                continue
             yield {
                 "task_id": doc["task_id"],
                 "mp_id": mp_id,
