@@ -225,6 +225,7 @@ def get_bulk_flow(
     if remove_symmetry:
         magmom_vals = {el: 0.6 for el in map(str, struct_.elements)}
         flow = update_user_incar_settings(flow, incar_updates={"MAGMOM": magmom_vals})
+
     return flow
 
 
