@@ -102,3 +102,17 @@ def jdoc_to_entry(
             {**entry_dict, "structure": structure, "entry_id": entry_id}
         )
     return ComputedEntry.from_dict({**entry_dict, "entry_id": entry_id})
+
+
+def update_metadata(flow: jobflow.Flow | jobflow.Job, metadata_updates: dict) -> None:
+    """Update the metadata for a flow.
+
+    Args:
+        flow: The flow to update.
+        metadata_updates: The updates to make.
+    """
+    for job in flow.jobs:
+        if isinstance(job, jobflow.Flow):
+            update_metadata(job, metadata_updates)
+        else:
+            job.metadata.update(metadata_updates)

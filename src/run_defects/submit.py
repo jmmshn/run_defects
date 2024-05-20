@@ -85,6 +85,7 @@ BULK_STATIC_UC_HSE = update_user_incar_settings(
     incar_updates=HSE_INCAR_UPDATES
     | {"KPAR": 4, "NCORE": 1, "LREAL": False, "LMAXMIX": 6},
 )
+BULK_STATIC_UC_HSE.name = "bulk static HSE"
 
 BULK_STATIC_SC = update_user_kpoints_settings(
     BULK_STATIC_UC, kpoints_updates=SPECIAL_KPOINT
@@ -180,7 +181,7 @@ def get_bulk_flow(
     static_maker: jobflow.Maker,
     relax_maker: jobflow.Maker | None = None,
     additional_maker: jobflow.Maker | None = None,
-    remove_symmetry: bool = True,
+    remove_symmetry: bool = False,
 ) -> jobflow.Flow:
     """Get the bulk workflow for a structure.
 
@@ -209,13 +210,15 @@ def get_bulk_flow(
     if relax_maker:
         relax_job = relax_maker.make(struct_)
         jobs.append(relax_job)
-        relax_job.name = f"{formula} static"
+        for j_ in relax_job.jobs:
+            j_.name = f"{formula} relax"
         struct_out = relax_job.output.structure
     else:
         struct_out = struct_
 
     static_job = static_maker.make(struct_out)
     static_job.name = f"{formula} static"
+    struct_out = static_job.output.structure
     jobs.append(static_job)
     if additional_maker:
         add_job = additional_maker.make(struct_out)
@@ -225,7 +228,6 @@ def get_bulk_flow(
     if remove_symmetry:
         magmom_vals = {el: 0.6 for el in map(str, struct_.elements)}
         flow = update_user_incar_settings(flow, incar_updates={"MAGMOM": magmom_vals})
-
     return flow
 
 
