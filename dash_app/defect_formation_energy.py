@@ -1,5 +1,7 @@
 """Example Dash App."""
 
+from collections.abc import Sequence
+
 import dash
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
@@ -76,7 +78,7 @@ def update_chempot_diagram(chemsys: str) -> go.Figure:
 
 
 graph_fed = dcc.Graph(id="formation_en")
-graph_chempot = dcc.Graph(id="chempot", figure=update_chempot_diagram(ALL_CHEMSYS[0]))
+graph_chempot = dcc.Graph(id="chempot")
 
 chemsys_card = dbc.Card(
     [
@@ -90,6 +92,17 @@ chemsys_card = dbc.Card(
     ],
     body=True,
 )
+fed_card = dbc.Card(
+    [
+        html.Div(
+            [
+                dbc.Label("Formation Energy Diagram"),
+                graph_fed,
+            ]
+        ),
+    ],
+    body=True,
+)
 
 app.layout = dbc.Container(
     [
@@ -97,8 +110,8 @@ app.layout = dbc.Container(
         html.Hr(),
         dbc.Row(
             [
-                dbc.Col(chemsys_card, md=6),
-                dbc.Col(graph_fed, md=4),
+                dbc.Col(chemsys_card, md=5),
+                dbc.Col(fed_card, md=5),
             ],
             align="center",
         ),
@@ -109,17 +122,16 @@ app.layout = dbc.Container(
 
 def _plot_fed_data(fed_data: dict, chemsys: str = None) -> go.Figure:
     fig = go.Figure()
-    for uid, data in fed_data.items():
+    for name, data in fed_data.items():
         if chemsys is not None and data["chemsys"] != chemsys:
             continue
         _plot_line(
             pts=data["fed"].get_transitions(data["chempot"]),
             fig=fig,
-            name=uid,
+            name=name,
             color=data["color"],
             style=data["style"],
             meta={"formation_energy_plot": True},
-            uid=uid,
         )
     _label_slopes(fig)
     fig.update_layout(
@@ -135,36 +147,53 @@ def _plot_fed_data(fed_data: dict, chemsys: str = None) -> go.Figure:
     return fig
 
 
-def _shift_slope_labels(fig: dict, filter_uids: list[str], shift: float) -> None:
+def _shift_slope_labels(fig: dict, filter_name: list[str], shift: float) -> None:
     for data_ in fig["data"]:
-        uid_ = data_.get("uid", None)
-        if uid_ not in filter_uids:
+        name_ = data_.get("name", None)
+        if name_ not in filter_name:
             continue
         data_["y"] = [y_ + shift for y_ in data_["y"]]
 
 
-# def _shift_annotation(fig, name, color, shift):
-#     for anno in fig["layout"]["annotations"]:
-#         if anno["text"] == name and anno["font"]["color"] == color:
-#             anno["y"] += shift
+def _update_fed_from_3d_chempot(
+    fed_data: dict, chemsys: str, d_click_data: dict, formation_en_fig: dict
+) -> None:
+    update_names = {
+        name_ for name_, data in fed_data.items() if data["chemsys"] == chemsys
+    }
+    vec_ = (
+        d_click_data["points"][0]["x"],
+        d_click_data["points"][0]["y"],
+        d_click_data["points"][0]["z"],
+    )
+    ic(vec_, update_names)
+    _update_fed_with_click_data(fed_data, formation_en_fig, update_names, vec_)
 
 
 def _update_fed_from_2d_chempot(
     fed_data: dict, chemsys: str, d_click_data: dict, formation_en_fig: dict
 ) -> None:
     """Update all materials with the same chemsys."""
-    update_uids = {uid for uid, data in fed_data.items() if data["chemsys"] == chemsys}
-    x, y = d_click_data["points"][0]["x"], d_click_data["points"][0]["y"]
+    update_names = {
+        name_ for name_, data in fed_data.items() if data["chemsys"] == chemsys
+    }
+    vec_ = d_click_data["points"][0]["x"], d_click_data["points"][0]["y"]
+    _update_fed_with_click_data(fed_data, formation_en_fig, update_names, vec_)
+
+
+def _update_fed_with_click_data(
+    fed_data: dict, formation_en_fig: dict, update_names: Sequence, vec_: list
+) -> None:
     for data_ in formation_en_fig["data"]:
-        uid_ = data_.get("uid", None)
-        if uid_ not in update_uids:
+        name_ = data_.get("name", None)
+        if name_ not in update_names:
             continue
-        fed_ = fed_data[uid_]["fed"]
-        chempot = dict(zip(fed_.chempot_diagram.elements, (x, y)))
+        fed_ = fed_data[name_]["fed"]
+        chempot = dict(zip(fed_.chempot_diagram.elements, vec_))
         pts = fed_.get_transitions(chempot)
         y_shift = pts[0][1] - data_["y"][0]
-        uids_to_shift = {uid_, f"{uid_}:slope"}
-        _shift_slope_labels(formation_en_fig, uids_to_shift, y_shift)
+        names_to_shift = {name_, f"{name_}:slope"}
+        _shift_slope_labels(formation_en_fig, names_to_shift, y_shift)
 
 
 @app.callback(
@@ -175,11 +204,18 @@ def _update_fed_from_2d_chempot(
 )
 def update_fed(d_click_data: dict, chemsys: str, formation_en_fig: dict) -> go.Figure:
     """Callback to update the formation energy diagram."""
-    ic(ctx.triggered_id, chemsys)
+    ic(ctx.triggered_id, chemsys, d_click_data)
     if formation_en_fig is None or ctx.triggered_id == "chemsys_dropdown":
         return _plot_fed_data(FEDS_DATA, chemsys=chemsys)
     if len(chemsys.split("-")) == 2:
         _update_fed_from_2d_chempot(
+            FEDS_DATA,
+            chemsys=chemsys,
+            d_click_data=d_click_data,
+            formation_en_fig=formation_en_fig,
+        )
+    if len(chemsys.split("-")) == 3:
+        _update_fed_from_3d_chempot(
             FEDS_DATA,
             chemsys=chemsys,
             d_click_data=d_click_data,
