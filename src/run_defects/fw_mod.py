@@ -11,6 +11,8 @@ from monty.json import MontyDecoder, jsanitize
 from pymatgen.core import Structure
 from pymatgen.io.vasp.inputs import Incar, Poscar
 
+from run_defects.utils import rget
+
 if TYPE_CHECKING:
     from collections.abc import Generator
 
@@ -226,12 +228,23 @@ def get_charged_structure(fw_id: int, lpad: LaunchPad = None) -> Structure:
     logger.debug(f"Get the charged structure for {fw_id} from {dir_name}")
     contcar = _read_contcar(dir_name)
     structure: Structure = contcar.structure
+    defect_charge = None
+    try:
+        defect_charge_path = (
+            "spec._tasks.0.job.function.@bound"
+            ".write_additional_data.info:json.charge_state"
+        )
+        defect_charge = rget(fw_dict, defect_charge_path)
+    except KeyError:
+        pass
 
-    old_struct = fw_dict["spec"]["_tasks"][0]["job"]["function_args"][0]
-    old_struct = MontyDecoder().process_decoded(
-        fw_dict["spec"]["_tasks"][0]["job"]["function_args"][0]
-    )
-    if not isinstance(old_struct, Structure):
-        raise TypeError("Check that the arg is parsed correctly")
-    structure._charge = old_struct._charge  # : SLF001
+    if defect_charge is None:
+        old_struct = fw_dict["spec"]["_tasks"][0]["job"]["function_args"][0]
+        old_struct = MontyDecoder().process_decoded(
+            fw_dict["spec"]["_tasks"][0]["job"]["function_args"][0]
+        )
+        defect_charge = old_struct._charge
+        if not isinstance(old_struct, Structure):
+            raise TypeError("Check that the arg is parsed correctly")
+    structure._charge = defect_charge
     return structure
