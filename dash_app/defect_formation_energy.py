@@ -110,8 +110,8 @@ app.layout = dbc.Container(
         html.Hr(),
         dbc.Row(
             [
-                dbc.Col(chemsys_card, md=5),
-                dbc.Col(fed_card, md=5),
+                dbc.Col(chemsys_card, md=5, width={"size": 5, "offset": 1}),
+                dbc.Col(fed_card, md=5, width={"size": 5, "offset": 1}),
             ],
             align="center",
         ),
@@ -204,7 +204,6 @@ def _update_fed_with_click_data(
 )
 def update_fed(d_click_data: dict, chemsys: str, formation_en_fig: dict) -> go.Figure:
     """Callback to update the formation energy diagram."""
-    ic(ctx.triggered_id, chemsys, d_click_data)
     if formation_en_fig is None or ctx.triggered_id == "chemsys_dropdown":
         return _plot_fed_data(FEDS_DATA, chemsys=chemsys)
     if len(chemsys.split("-")) == 2:
