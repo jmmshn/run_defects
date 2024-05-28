@@ -22,9 +22,10 @@ dependencies = [
   "azure-storage-blob",
   "azure-identity",
   'pymatgen-analysis-defects @ git+https://github.com/materialsproject/pymatgen-analysis-defects',
-  'fireworks @ git+https://github.com/materialsproject/fireworks',
-  'atomate2 @ git+https://github.com/jmmshn/atomate2@js_runs'
+  'atomate2 @ git+https://github.com/jmmshn/atomate2@js_runs',
+  'fireworks @ git+https://github.com/materialsproject/fireworks'
 ]
+
 dynamic = ["version"]
 keywords = ["pymatgen",]
 license = {text = "modified BSD"}
