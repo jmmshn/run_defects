@@ -19,7 +19,10 @@ authors = [{name = "Jimmy-Xuan Shen", email = "jmmshn@gmail.com"}]
 dependencies = [
   'pymatgen',
   'jobflow',
-  'pymatgen-analysis-defects @ git+https://github.com/materialsproject/pymatgen-analysis-defects@js_runs',
+  "azure-storage-blob",
+  "azure-identity",
+  'pymatgen-analysis-defects @ git+https://github.com/materialsproject/pymatgen-analysis-defects',
+  'fireworks @ git+https://github.com/materialsproject/fireworks',
   'atomate2 @ git+https://github.com/jmmshn/atomate2@js_runs'
 ]
 dynamic = ["version"]

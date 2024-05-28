@@ -78,6 +78,14 @@ class BulkBuilder(Builder):
         ]
         self.total = len(valid_formulas)
         for formula in valid_formulas:
+            uuids_in = self.jobstore.distinct(
+                "uuid", {**j_query, "output.formula_pretty": formula}
+            )
+            uuids_completed = self.bulk_store.distinct(
+                "task_id", {**j_query, "output.formula_pretty": formula}
+            )
+            if set(uuids_in) == set(uuids_completed):
+                continue
             group = list(
                 self.jobstore.query(
                     {**j_query, "output.formula_pretty": formula}, properties=properties

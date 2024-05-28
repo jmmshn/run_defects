@@ -21,14 +21,10 @@ from pymatgen.analysis.defects.thermo import (
 )
 from pymatgen.analysis.phase_diagram import PhaseDiagram
 from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
-from pymatgen.entries.computed_entries import (
-    Composition,
-    ComputedEntry,
-    ComputedStructureEntry,
-)
+from pymatgen.entries.computed_entries import Composition, ComputedEntry
 from pymatgen.ext.matproj import MPRester
 
-from run_defects.utils import mdecode
+from run_defects.utils import jdoc_to_entry, mdecode
 
 azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
 azlogger.setLevel(logging.WARNING)
@@ -82,9 +78,15 @@ class DielectricBuilder(MapBuilder):
         """Get the items to process."""
         for doc in super().get_items():
             bulk_uuid = doc["candidate_bulk_docs"][0]["uuid"]
-            mp_id = self.jobstore.query_one(
+            mp_doc_ = self.jobstore.query_one(
                 {"uuid": bulk_uuid}, properties=["metadata"]
-            )["metadata"]["material_id"]
+            )
+            if mp_doc_ is None:
+                continue
+            mp_id = mp_doc_["metadata"]["material_id"]
+            de_data = _get_dielectric_data(mp_id)
+            if de_data is None:
+                continue
             yield {
                 "task_id": doc["task_id"],
                 "mp_id": mp_id,
@@ -266,7 +268,7 @@ class DefectEntryBuilder(Builder):
             defect_entry = DefectEntry(
                 defect=defect_obj,
                 charge_state=charge_state,
-                sc_entry=_get_sc_entry(job_doc),
+                sc_entry=jdoc_to_entry(job_doc, inc_structure=True),
             )
 
             if int(defect_entry.charge_state) != int(
@@ -346,13 +348,27 @@ class PDBuilder(Builder):
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
         all_chemsys = self.defect_entry_store.distinct("defect_chemsys")
+        all_chemsys_and_type = self.pd_store.distinct("chemsys_and_type")
         for chemsys in all_chemsys:
+            if f"{chemsys}:{self.thermo_type}" in all_chemsys_and_type:
+                self.logger.info(f"Skipping {chemsys} for {self.thermo_type}")
+                continue
             with MPRester() as mp:
+                try:
+                    pd_entries = mp.get_entries_in_chemsys(
+                        chemsys,
+                        additional_criteria={
+                            "energy_above_hull": (0.0, 0.1),
+                            "thermo_types": [self.thermo_type],
+                        },
+                    )
+                    pd_mp = PhaseDiagram(pd_entries)
+                except Exception as e:
+                    self.logger.warning(f"Error getting PD for {chemsys}: {e}")
+                    continue
                 yield {
                     "chemsys": chemsys,
-                    "phase_diagram": mp.thermo.get_phase_diagram_from_chemsys(
-                        chemsys, "GGA_GGA+U"
-                    ).as_dict(),
+                    "phase_diagram": pd_mp.as_dict(),
                 }
 
     def process_item(self, item: dict) -> dict:
@@ -368,6 +384,7 @@ class PDBuilder(Builder):
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
         items = list(filter(None, items))
+        self.logger.info(f"Updating {len(items)} phase diagrams.")
         for doc in items:
             doc[self.pd_store.last_updated_field] = _utc()
         self.pd_store.update(items)
@@ -430,7 +447,7 @@ class ElementBuilder(Builder):
         for g, docs in itertools.groupby(
             job_docs, key=lambda d: d["output"]["formula_pretty"]
         ):
-            entries = [*map(_get_sc_entry, docs)]
+            entries = [*map(jdoc_to_entry, docs)]
             stable_entry = min(entries, key=lambda ent: ent.energy_per_atom)
             comp_ = stable_entry.composition
             chemsys = "-".join(sorted([el.symbol for el in comp_.elements]))
@@ -596,7 +613,14 @@ class FormationEnergyBuilder(Builder):
         """Get the items to process."""
         agg_pipe = self.corrected_defect_entry_store._collection.aggregate(
             [
-                {"$match": self.query},
+                {
+                    "$match": {
+                        "defect_name": {"$exists": 1},
+                        "bulk_formula": {"$exists": 1},
+                        "defect_run_type": {"$exists": 1},
+                        **self.query,
+                    }
+                },
                 {
                     "$group": {
                         "_id": {
@@ -642,6 +666,11 @@ class FormationEnergyBuilder(Builder):
             pd_doc = self.pd_store.query_one(
                 {"chemsys": defect_chemsys, "thermo_type": self.thermo_type}
             )
+            if pd_doc is None:
+                self.logger.error(
+                    f"Phase diagram data not found for {defect_chemsys}. Skipping."
+                )
+                continue
             bandgap_docs = list(
                 self.bandgap_store.query({"formula_pretty": bulk_formula})
             )
@@ -724,14 +753,14 @@ def _get_energy(bulk_doc: dict) -> float:
     return ComputedEntry.from_dict(bulk_doc["entry"]).energy_per_atom
 
 
-def _get_sc_entry(doc: dict) -> ComputedStructureEntry:
-    """Get the ComputedStructureEntry."""
-    entry_dict = doc["output"]["entry"]
-    structure = mdecode(doc["output"]["structure"])
-    entry_id = doc["uuid"]
-    return ComputedStructureEntry.from_dict(
-        {**entry_dict, "structure": structure, "entry_id": entry_id}
-    )
+# def jdoc_to_entry(doc: dict) -> ComputedStructureEntry:
+#     """Get the ComputedStructureEntry."""
+#     entry_dict = doc["output"]["entry"]
+#     structure = mdecode(doc["output"]["structure"])
+#     entry_id = doc["uuid"]
+#     return ComputedStructureEntry.from_dict(
+#         {**entry_dict, "structure": structure, "entry_id": entry_id}
+#     )
 
 
 @lru_cache(maxsize=200)

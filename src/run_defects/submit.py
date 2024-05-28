@@ -46,7 +46,7 @@ INCAR_UPDATES = {
     "NELMIN": 5,
     "ISMEAR": 0,
     "SIGMA": 0.05,
-    "NELM": 300,
+    "NELM": 100,
     "ENCUT": 520,
     "ALGO": "Normal",
     "POTIM": 0.25,
@@ -55,7 +55,8 @@ INCAR_UPDATES = {
 }
 
 HSE_INCAR_UPDATES = {
-    "ALGO": "Normal",
+    "ALGO": "Damped",
+    "TIME": 0.5,
     "HFSCREEN": 0.2,
     "GGA": "PE",
     "LHFCALC": True,
@@ -63,7 +64,11 @@ HSE_INCAR_UPDATES = {
 }
 
 BULK_RELAX_UC = update_user_incar_settings(
-    MPGGADoubleRelaxMaker(), incar_updates=INCAR_UPDATES
+    MPGGADoubleRelaxMaker(), incar_updates=INCAR_UPDATES | {"KPAR": 2}
+)
+
+BULK_RELAX_SC = update_user_kpoints_settings(
+    BULK_RELAX_UC, kpoints_updates=SPECIAL_KPOINT
 )
 
 BULK_STATIC_UC = MPGGAStaticMaker(
@@ -71,7 +76,8 @@ BULK_STATIC_UC = MPGGAStaticMaker(
 )
 
 BULK_STATIC_UC = update_user_incar_settings(
-    BULK_STATIC_UC, incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False}
+    BULK_STATIC_UC,
+    incar_updates=INCAR_UPDATES | {"LVHAR": True, "LREAL": False, "KPAR": 4},
 )
 
 BULK_STATIC_UC_HSE = update_user_incar_settings(
@@ -79,6 +85,7 @@ BULK_STATIC_UC_HSE = update_user_incar_settings(
     incar_updates=HSE_INCAR_UPDATES
     | {"KPAR": 4, "NCORE": 1, "LREAL": False, "LMAXMIX": 6},
 )
+BULK_STATIC_UC_HSE.name = "bulk static HSE"
 
 BULK_STATIC_SC = update_user_kpoints_settings(
     BULK_STATIC_UC, kpoints_updates=SPECIAL_KPOINT
@@ -129,7 +136,7 @@ F_MAKER_UC = FormationEnergyMaker(
 
 F_MAKER_SC = FormationEnergyMaker(
     defect_relax_maker=DEFECT_RELAX_SC,
-    uc_bulk=False,
+    uc_bulk=True,
     perturb=0.2,
     collect_defect_entry_data=False,
     relax_radius="auto",
@@ -174,7 +181,7 @@ def get_bulk_flow(
     static_maker: jobflow.Maker,
     relax_maker: jobflow.Maker | None = None,
     additional_maker: jobflow.Maker | None = None,
-    remove_symmetry: bool = True,
+    remove_symmetry: bool = False,
 ) -> jobflow.Flow:
     """Get the bulk workflow for a structure.
 
@@ -203,13 +210,15 @@ def get_bulk_flow(
     if relax_maker:
         relax_job = relax_maker.make(struct_)
         jobs.append(relax_job)
-        relax_job.name = f"{formula} static"
+        for j_ in relax_job.jobs:
+            j_.name = f"{formula} relax"
         struct_out = relax_job.output.structure
     else:
         struct_out = struct_
 
     static_job = static_maker.make(struct_out)
     static_job.name = f"{formula} static"
+    struct_out = static_job.output.structure
     jobs.append(static_job)
     if additional_maker:
         add_job = additional_maker.make(struct_out)
@@ -336,3 +345,8 @@ def get_defect_sc_job_from_completed(
     """
     for dd_ in _get_completed_defects_calcs(query=query, jobstore=jobstore, **kwargs):
         yield _get_defect_flow_from_info(maker, dd_["info"], dd_["structure"])
+
+
+def chunker(seq: list, size: int) -> Generator:
+    """Chunk a sequence into chunks of size."""
+    return (seq[pos : pos + size] for pos in range(0, len(seq), size))
