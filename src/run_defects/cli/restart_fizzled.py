@@ -68,10 +68,16 @@ def main(
     q = json.loads(query)
     fizzled = [int(fw_id)] if fw_id is not None else _get_fw_id_by_state(q)
     for fw_id in fizzled:
-        structure = get_charged_structure(fw_id)
-        last_launch_dir = _get_last_launch_dir(LPAD.get_fw_dict_by_id(fw_id))
-        incar_orig, incar = _read_incar(last_launch_dir)
-        incar_update_dict = _get_incar_diff(incar_orig, incar)
+        try:
+            structure = get_charged_structure(fw_id)
+            last_launch_dir = _get_last_launch_dir(LPAD.get_fw_dict_by_id(fw_id))
+            incar_orig, incar = _read_incar(last_launch_dir)
+            incar_update_dict = _get_incar_diff(incar_orig, incar)
+        except Exception:
+            logger.exception(f"FAILED: {fw_id}")
+            continue
+
+        logger.info(f"FW_ID: {fw_id}")
         logger.info(f"Launch Dir: {last_launch_dir}")
         logger.info(f"INCAR Update: {incar_update_dict}")
         logger.info(f"Parsed Structure: {structure.formula}")
