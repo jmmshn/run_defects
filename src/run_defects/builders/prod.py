@@ -1,5 +1,6 @@
 """Utilities for building the production database."""
 
+import itertools
 import logging
 from collections.abc import Generator
 
@@ -88,7 +89,7 @@ class AllDefectsBuilder(Builder):
                 **group["_id"],
             }
 
-    def process_item(self, item: dict) -> dict:
+    def process_item(self, item: dict) -> Generator[dict, None, None]:
         """Process an item."""
         entry = item["entry"]
         chgcar = mdecode(item["chgcar"]["data"])
@@ -100,20 +101,23 @@ class AllDefectsBuilder(Builder):
                 completed_charge_states={i: False for i in range(-4, 5)},
                 auto_charge_states=charge_states,
             )
-        return {
-            "material_id": item["material_id"],
-            "formula_pretty": item["formula_pretty"],
-            "run_type": item["run_type"],
-            "chemsys": item["chemsys"],
-            "entry": entry.as_dict(),
-            "defects": defects_dict,
-            "bulk_uuid": entry.entry_id,
-            "task_id": entry.entry_id,
-        }
+        for defect_key_, dd_ in defects_dict.items():
+            yield {
+                "material_id": item["material_id"],
+                "bulk_formula": item["formula_pretty"],
+                "run_type": item["run_type"],
+                "chemsys": item["chemsys"],
+                "bulk_entry": entry.as_dict(),
+                "defect": dd_["defect"],
+                "bulk_uuid": entry.entry_id,
+                "task_id": f"{entry.entry_id}:{defect_key_}",
+            }
 
-    def update_targets(self, item: dict) -> None:
+    def update_targets(self, items: list) -> None:
         """Update the target store."""
-        self.all_defects.update(item)
+        items = list(filter(None, itertools.chain.from_iterable(items)))
+        self.logger.info(f"Updating {len(items)} documents")
+        self.all_defects.update(docs=items)
 
 
 class TagFinishedDefect(Builder):
