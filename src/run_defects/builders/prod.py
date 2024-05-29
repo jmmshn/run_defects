@@ -7,6 +7,7 @@ from collections.abc import Generator
 from jobflow import JobStore
 from maggma.core.builder import Builder
 from maggma.stores import Store
+from pymatgen.analysis.structure_matcher import ElementComparator, StructureMatcher
 
 from run_defects.submit import get_defects
 from run_defects.utils import mdecode
@@ -99,11 +100,13 @@ class AllDefectsBuilder(Builder):
             defects_dict[f"{defect.name}:{ii}"] = dict(
                 defect=defect.as_dict(),
                 completed_charge_states={
-                    "GGA_GGA+U": {i: False for i in range(-6, 7)},
-                    "HSE06": {i: False for i in range(-6, 7)},
+                    "GGA_GGA+U": {i: None for i in range(-6, 7)},
+                    "HSE06": {i: None for i in range(-6, 7)},
                 },
                 auto_charge_states=charge_states,
+                defect_name=defect.name,
             )
+
         for defect_key_, dd_ in defects_dict.items():
             yield {
                 "material_id": item["material_id"],
@@ -111,9 +114,9 @@ class AllDefectsBuilder(Builder):
                 "run_type": item["run_type"],
                 "chemsys": item["chemsys"],
                 "bulk_entry": entry.as_dict(),
-                "defect": dd_["defect"],
                 "bulk_uuid": entry.entry_id,
-                "task_id": f"{entry.entry_id}:{defect_key_}",
+                "task_id": f"{item['material_id']}:{defect_key_}",
+                **dd_,
             }
 
     def update_targets(self, items: list) -> None:
@@ -157,7 +160,7 @@ class TagFinishedDefect(Builder):
                     "$group": {
                         "_id": {
                             "bulk_formula": "$bulk_formula",
-                            "defect_name": "$defect.name",
+                            "defect_name": "$defect_name",
                         },
                         "defect_docs": {
                             "$push": {
@@ -175,29 +178,56 @@ class TagFinishedDefect(Builder):
         for group in formula_and_defect_name_pipe:
             bulk_formula = group["_id"]["bulk_formula"]
             defect_name = group["_id"]["defect_name"]
+            defect_docs = mdecode(group["defect_docs"])
             for de_doc in self.defect_entries.query(
                 criteria={"bulk_formula": bulk_formula, "defect_name": defect_name}
             ):
-                yield {"de_doc": de_doc, "defect_docs": group["defect_docs"]}
+                yield {"de_doc": de_doc, "defect_docs": defect_docs}
 
-    def process_item(self, item: dict) -> Generator[dict, None, None]:
+    def process_item(self, item: dict) -> Generator[list, None, None]:
         """Process an item."""
-        # sm = StructureMatcher(
-        #     ltol=self.ltol,
-        #     stol=self.stol,
-        #     angle_tol=self.angle_tol,
-        #     comparator=ElementComparator(),
-        # )
+        sm = StructureMatcher(
+            ltol=self.ltol,
+            stol=self.stol,
+            angle_tol=self.angle_tol,
+            comparator=ElementComparator(),
+        )
         de_doc = item["de_doc"]
+        qq_ = de_doc["defect_entry"]["charge_state"]
         defect_docs = item["defect_docs"]
         run_type = de_doc["defect_run_type"]
         if run_type == "GGA" or run_type == "GGA+U":
             run_type = "GGA_GGA+U"
-
+        dent = mdecode(de_doc["defect_entry"])
+        dent_defect_structure = dent.defect.defect_structure
+        dent_bulk_structure = dent.defect.structure
+        matched_ids = []
         for defect_doc in defect_docs:
             defect = defect_doc["defect"]
-            if defect["name"] == de_doc["defect_name"]:
-                defect_doc["completed_charge_states"][de_doc["run_type"]][
-                    de_doc["charge"]
-                ] = True
-        yield from defect_docs
+            defect_structure = defect.defect_structure
+            bulk_structure = defect.structure
+            if sm.fit(dent_defect_structure, defect_structure) and sm.fit(
+                dent_bulk_structure, bulk_structure
+            ):
+                yield [
+                    {"task_id": defect_doc["task_id"]},
+                    {
+                        "$set": {
+                            f"completed_charge_states.{run_type}.{qq_}": de_doc[
+                                "task_id"
+                            ]
+                        }
+                    },
+                ]
+                matched_ids.append(defect_doc["task_id"])
+                if len(matched_ids) > 1:
+                    self.logger.warning(
+                        f"Multiple matching defect structures, {matched_ids}"
+                    )
+
+    def update_targets(self, items: list) -> None:
+        """Update the target store."""
+        updates = list(filter(None, itertools.chain.from_iterable(items)))
+        self.logger.info(f"Updating {len(items)} documents")
+        for up in updates:
+            self.all_defects._collection.update_one(*up)
