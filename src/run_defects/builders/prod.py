@@ -30,7 +30,7 @@ class AllDefectsBuilder(Builder):
         self.jobstore = jobstore
         self.all_defects = all_defects
         self.query = query or {}
-        super().__init__(sources=[jobstore], targets=[all_defects], **kwargs)
+        super().__init__(sources=[jobstore, all_defects], **kwargs)
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
@@ -174,8 +174,9 @@ class TagFinishedDefect(Builder):
                 },
             ]
         )
-
-        for group in formula_and_defect_name_pipe:
+        formula_and_defect_name_results = list(formula_and_defect_name_pipe)
+        self.logger.info(f"Found {len(formula_and_defect_name_results)} groups")
+        for group in formula_and_defect_name_results:
             bulk_formula = group["_id"]["bulk_formula"]
             defect_name = group["_id"]["defect_name"]
             defect_docs = mdecode(group["defect_docs"])
