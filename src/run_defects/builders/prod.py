@@ -114,3 +114,23 @@ class AllDefectsBuilder(Builder):
     def update_targets(self, item: dict) -> None:
         """Update the target store."""
         self.all_defects.update(item)
+
+
+class TagFinishedDefect(Builder):
+    """Tag the finished defect as completed."""
+
+    def __init__(
+        self,
+        jobstore: JobStore,
+        all_defects: Store,
+        **kwargs,
+    ) -> None:
+        """Initialize the BlessedBulkBuilder."""
+        self.jobstore = jobstore
+        self.all_defects = all_defects
+        super().__init__(
+            sources=[jobstore, all_defects], targets=[all_defects], **kwargs
+        )
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
