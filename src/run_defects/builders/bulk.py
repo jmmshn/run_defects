@@ -9,7 +9,6 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from icecream import ic
 from maggma.builders import Builder
 from maggma.builders.map_builder import MapBuilder
 from maggma.core.store import Store
@@ -63,8 +62,8 @@ class BulkBuilder(Builder):
         valid_formulas = self.jobstore.distinct(
             "output.formula_pretty", criteria=j_query
         )
-        ic(j_query)
-        ic(valid_formulas)
+        self.logger.info(j_query)
+        self.logger.info(valid_formulas)
         properties = [
             "output.vasp_objects.locpot",
             "output.entry",

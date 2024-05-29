@@ -253,22 +253,25 @@ def get_defects(
     """Generate the defects for a chgcar."""
     tup_el = _get_elements(chgcar.structure)
     tup_sub = _get_subs(chgcar.structure)
-    for sub_d in tup_sub[:max_iter]:
+    for sub_d in tup_sub:
         for ii, defect in enumerate(SGEN.generate(chgcar.structure, sub_d)):
-            yield defect, ii
+            if ii < max_iter:
+                yield defect, ii
 
-    for el in tup_el[:max_iter]:
+    for el in tup_el:
         for ii, defect in enumerate(VGEN.generate(chgcar.structure, el)):
-            yield defect, ii
+            if ii < max_iter:
+                yield defect, ii
 
-    for el in tup_el[:max_iter]:
+    for el in tup_el:
         for ii, defect in enumerate(
             IGEN.generate(
                 chgcar,
                 el,
             )
         ):
-            yield defect, ii
+            if ii < max_iter:
+                yield defect, ii
 
 
 def get_submitted_defect_run_ids() -> set:
