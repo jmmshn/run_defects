@@ -98,7 +98,10 @@ class AllDefectsBuilder(Builder):
             charge_states = defect.get_charge_states()
             defects_dict[f"{defect.name}:{ii}"] = dict(
                 defect=defect.as_dict(),
-                completed_charge_states={i: False for i in range(-4, 5)},
+                completed_charge_states={
+                    "GGA_GGA+U": {i: False for i in range(-6, 7)},
+                    "HSE06": {i: False for i in range(-6, 7)},
+                },
                 auto_charge_states=charge_states,
             )
         for defect_key_, dd_ in defects_dict.items():
@@ -125,16 +128,76 @@ class TagFinishedDefect(Builder):
 
     def __init__(
         self,
-        jobstore: JobStore,
+        defect_entries: JobStore,
         all_defects: Store,
+        ltol: float = 0.2,
+        stol: float = 0.3,
+        angle_tol: float = 5,
+        query: dict = None,
         **kwargs,
     ) -> None:
         """Initialize the BlessedBulkBuilder."""
-        self.jobstore = jobstore
+        self.defect_entries = defect_entries
         self.all_defects = all_defects
+        self.ltol, self.stol, self.angle_tol = ltol, stol, angle_tol
+        self.query = query or {}
         super().__init__(
-            sources=[jobstore, all_defects], targets=[all_defects], **kwargs
+            sources=[defect_entries, all_defects], targets=[all_defects], **kwargs
         )
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
+        all_defects_query = self.query
+        formula_and_defect_name_pipe = self.all_defects._collection.aggregate(
+            [
+                {
+                    "$match": all_defects_query,
+                },
+                {
+                    "$group": {
+                        "_id": {
+                            "bulk_formula": "$bulk_formula",
+                            "defect_name": "$defect.name",
+                        },
+                        "defect_docs": {
+                            "$push": {
+                                "material_id": "$material_id",
+                                "bulk_uuid": "$bulk_uuid",
+                                "task_id": "$task_id",
+                                "defect": "$defect",
+                            }
+                        },
+                    }
+                },
+            ]
+        )
+
+        for group in formula_and_defect_name_pipe:
+            bulk_formula = group["_id"]["bulk_formula"]
+            defect_name = group["_id"]["defect_name"]
+            for de_doc in self.defect_entries.query(
+                criteria={"bulk_formula": bulk_formula, "defect_name": defect_name}
+            ):
+                yield {"de_doc": de_doc, "defect_docs": group["defect_docs"]}
+
+    def process_item(self, item: dict) -> Generator[dict, None, None]:
+        """Process an item."""
+        # sm = StructureMatcher(
+        #     ltol=self.ltol,
+        #     stol=self.stol,
+        #     angle_tol=self.angle_tol,
+        #     comparator=ElementComparator(),
+        # )
+        de_doc = item["de_doc"]
+        defect_docs = item["defect_docs"]
+        run_type = de_doc["defect_run_type"]
+        if run_type == "GGA" or run_type == "GGA+U":
+            run_type = "GGA_GGA+U"
+
+        for defect_doc in defect_docs:
+            defect = defect_doc["defect"]
+            if defect["name"] == de_doc["defect_name"]:
+                defect_doc["completed_charge_states"][de_doc["run_type"]][
+                    de_doc["charge"]
+                ] = True
+        yield from defect_docs
