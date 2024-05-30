@@ -30,17 +30,15 @@ class AllDefectsBuilder(Builder):
         self.jobstore = jobstore
         self.all_defects = all_defects
         self.query = query or {}
-        super().__init__(sources=[jobstore, all_defects], **kwargs)
+        super().__init__(sources=[jobstore], targets=[all_defects], **kwargs)
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
-        finished_mpids = self.all_defects.distinct("material_id")
         job_query = {
             "output.vasp_objects.locpot.@class": "Chgcar",
             "output.vasp_objects.chgcar.@class": "Chgcar",
             "output.calcs_reversed.0.run_type": {"$in": ["GGA+U", "GGA"]},
             "output.nelements": {"$gt": 1},
-            "metadata.material_id": {"$exists": 1, "$nin": finished_mpids},
             **self.query,
         }
         self.logger.info(f"QUERY: {job_query}")
@@ -144,9 +142,7 @@ class TagFinishedDefect(Builder):
         self.all_defects = all_defects
         self.ltol, self.stol, self.angle_tol = ltol, stol, angle_tol
         self.query = query or {}
-        super().__init__(
-            sources=[defect_entries, all_defects], targets=[all_defects], **kwargs
-        )
+        super().__init__(sources=[defect_entries, all_defects, all_defects], **kwargs)
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""
