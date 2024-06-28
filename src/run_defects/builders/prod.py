@@ -142,7 +142,9 @@ class TagFinishedDefect(Builder):
         self.all_defects = all_defects
         self.ltol, self.stol, self.angle_tol = ltol, stol, angle_tol
         self.query = query or {}
-        super().__init__(sources=[defect_entries, all_defects, all_defects], **kwargs)
+        super().__init__(
+            sources=[defect_entries, all_defects, all_defects], targets=[], **kwargs
+        )
 
     def get_items(self) -> Generator[dict, None, None]:
         """Get the items to process."""

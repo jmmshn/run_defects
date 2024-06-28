@@ -9,10 +9,12 @@ import logging
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+from icecream import ic
 from maggma.builders import Builder
 from maggma.builders.map_builder import MapBuilder
 from maggma.core import Store
-from monty.json import MontyDecoder
+from monty.json import MontyDecoder, jsanitize
 from pymatgen.analysis.defects.supercells import get_closest_sc_mat
 from pymatgen.analysis.defects.thermo import (
     DefectEntry,
@@ -27,9 +29,11 @@ from pymatgen.ext.matproj import MPRester
 from run_defects.utils import jdoc_to_entry, mdecode
 
 azlogger = logging.getLogger("azure.core.pipeline.policies.http_logging_policy")
-azlogger.setLevel(logging.WARNING)
+azlogger.setLevel(logging.ERROR)
 pmglogger = logging.getLogger("pymatgen.core.structure")
 pmglogger.setLevel(logging.ERROR)
+pymongologger = logging.getLogger("pymongo")
+pymongologger.setLevel(logging.ERROR)
 
 
 def _utc() -> datetime.datetime:
@@ -55,6 +59,64 @@ DEFECT_JOB_PROPERTIES = [
     "output.additional_json.info",
     "metadata",
 ]
+
+
+class DefectTaskBuider(Builder):
+    """Parse the jobstore data into defect tasks."""
+
+    def __init__(
+        self,
+        jobstore: JobStore,
+        defect_task_store: Store,
+        locpot_store: Store,
+        query: dict = None,
+        **kwargs,
+    ) -> None:
+        """Init."""
+        self.jobstore = jobstore
+        self.defect_task_store = defect_task_store
+        self.locpot_store = locpot_store
+        self.query = query or {}
+        super().__init__(
+            sources=[self.jobstore],
+            targets=[self.defect_task_store, self.locpot_store],
+            **kwargs,
+        )
+
+    def get_items(self) -> Generator[dict, None, None]:
+        """Get the items to process."""
+        q_ = {**DEFECT_JOB_QUERY, **self.query}
+        ids_todo = self.jobstore.distinct("uuid", q_)
+        ids_done = self.defect_task_store.distinct("task_id")
+        ids_todo = set(ids_todo) - set(ids_done)
+        self.total = len(ids_todo)
+        ic(self.total)
+        for uuid in ids_todo:
+            doc = self.jobstore.query_one({"uuid": uuid})
+            locpot_index = doc["output"].get("vasp_objects", {}).get("locpot")
+            locpot_doc = None
+            if locpot_index is not None:
+                locpot_doc = self.jobstore.additional_stores["data"].query_one(
+                    {"blob_uuid": locpot_index["blob_uuid"]}
+                )
+            yield {
+                "uuid": uuid,
+                "doc": doc,
+                "locpot_doc": locpot_doc,
+            }
+
+    def process_item(self, item: dict) -> dict:
+        """Process the item."""
+        return {
+            "task_id": item["uuid"],
+            "defect_name": item["output"]["additional_json"]["info"]["defect_name"],
+            "bulk_formula": item["output"]["additional_json"]["info"]["bulk_formula"],
+            "run_type": item["output"]["calcs_reversed"][0]["run_type"],
+            "defect": item["output"]["additional_json"]["info"]["defect"],
+        }
+
+    def update_targets(self, items: dict | list) -> None:
+        """Update the target store."""
 
 
 class DielectricBuilder(MapBuilder):
@@ -182,8 +244,8 @@ class DefectEntryBuilder(Builder):
 
             missing_uuids = list(set(group["uuids"]) - finished_task_ids)
             self.logger.info(
-                f"Processing {len(missing_uuids)}) missing uuids for group: "
-                "{group['_id']}"
+                f"Processing ({len(missing_uuids)}) missing uuids for group: "
+                f"{group['_id']}"
             )
             formula = group["_id"]["bulk_formula"]
             defect_name = group["_id"]["name"]
@@ -283,6 +345,12 @@ class DefectEntryBuilder(Builder):
             candidate_bulk_docs = []
             bulk_formula = item["formula"]
             for bulk_doc in item["bulk_docs"]:
+                if defect_run_type not in bulk_doc["runs"]:
+                    self.logger.warning(
+                        f"Run type {defect_run_type} not found in bulk doc.\n"
+                        f"bulk doc: {bulk_doc['task_id']}\n"
+                    )
+                    continue
                 for run_doc in bulk_doc["runs"][defect_run_type]:
                     bulk_struct = mdecode(run_doc["structure"])
                     if structure_matcher.fit(bulk_struct, ref_struct):
@@ -306,7 +374,7 @@ class DefectEntryBuilder(Builder):
             else:
                 self.logger.warning(
                     f"No bulk structures found for {defect_obj.name} "
-                    "in {bulk_formula}.\n"
+                    f"in {bulk_formula}.\n"
                     f"Defect Run uuid: {job_doc['uuid']}.\n"
                     f"Defect Run metadata: {job_doc['metadata']}.\n"
                     f"defect_run_type: {defect_run_type}.\n"
@@ -374,12 +442,15 @@ class PDBuilder(Builder):
     def process_item(self, item: dict) -> dict:
         """Process the item."""
         chemsys = item["chemsys"]
-        return {
-            "phase_diagram": item["phase_diagram"],
-            "chemsys": chemsys,
-            "thermo_type": self.thermo_type,
-            "chemsys_and_type": f"{chemsys}:{self.thermo_type}",
-        }
+        return jsanitize(
+            {
+                "phase_diagram": item["phase_diagram"],
+                "chemsys": chemsys,
+                "thermo_type": self.thermo_type,
+                "chemsys_and_type": f"{chemsys}:{self.thermo_type}",
+            },
+            recursive_msonable=True,
+        )
 
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
@@ -387,7 +458,23 @@ class PDBuilder(Builder):
         self.logger.info(f"Updating {len(items)} phase diagrams.")
         for doc in items:
             doc[self.pd_store.last_updated_field] = _utc()
+            try:
+                find_np(doc)
+            except Exception:
+                self.logger.exception("Error finding numpy arrays")
         self.pd_store.update(items)
+
+
+def find_np(obj: object, path: str = "") -> None:
+    """Get the path to the nested object that."""
+    if isinstance(obj, np.ndarray):
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            find_np(v, path=f"{path}.{k}")
+    if isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            find_np(v, path=f"{path}[{i}]")
 
 
 class ElementBuilder(Builder):
@@ -494,7 +581,6 @@ class FreysoldtBuilder(MapBuilder):
         """Get the items to process."""
         # call the parent class method
         for doc in super().get_items():
-            doc_ = self._replace_blob(doc, dry_run=False)
             dielectric_doc = self.dielectric_store.query_one(
                 {"task_id": doc["task_id"]}
             )
@@ -503,11 +589,13 @@ class FreysoldtBuilder(MapBuilder):
                     f"Dielectric data not found for {doc['task_id']}. Skipping."
                 )
                 continue
+            doc_ = self._replace_blob(doc, dry_run=False)
             doc_["dielectric_data"] = dielectric_doc["dielectric_data"]
             yield doc_
 
     def unary_function(self, item: dict) -> dict:
         """Perform the Freysoldt Correction."""
+        self.logger.info(f"Processing {item['task_id']}")
         defect_locpot = mdecode(item["defect_locpot"])
         bulk_doc = min(item["candidate_bulk_docs"], key=_get_energy)
         bulk_locpot = mdecode(bulk_doc["vasp_objects"]["locpot"])
@@ -562,12 +650,20 @@ class FreysoldtBuilder(MapBuilder):
         if isinstance(doc, dict):
             d_out = {}
             if "blob_uuid" in doc and "store" in doc:
-                return _read_blob(
-                    doc["blob_uuid"],
-                    doc["store"],
-                    dry_run,
-                    self.jobstore.to_json(),
-                )
+                try:
+                    return _read_blob(
+                        doc["blob_uuid"],
+                        doc["store"],
+                        dry_run,
+                        self.jobstore.to_json(),
+                    )
+                except Exception:
+                    blob_uuid = doc["blob_uuid"]
+                    doc_uuid = doc["uuid"]
+                    self.logger.exception(
+                        f"Error reading blob: {blob_uuid} " f"for {doc_uuid}"
+                    )
+                    return None
             for k, v in doc.items():
                 d_out[k] = self._replace_blob(v, dry_run=dry_run)
             return d_out

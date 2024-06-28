@@ -52,6 +52,7 @@ INCAR_UPDATES = {
     "POTIM": 0.25,
     "LORBIT": 11,
     "NCORE": 4,
+    "LMAXMIX": 4,
 }
 
 HSE_INCAR_UPDATES = {
@@ -61,6 +62,7 @@ HSE_INCAR_UPDATES = {
     "GGA": "PE",
     "LHFCALC": True,
     "PRECFOCK": "Normal",
+    "LDAU": False,
 }
 
 BULK_RELAX_UC = update_user_incar_settings(
