@@ -72,6 +72,7 @@ class DefectTaskBuider(Builder):
         defect_task_store: Store,
         locpot_store: Store,
         query: dict = None,
+        chunk_size: int = 16,
         **kwargs,
     ) -> None:
         """Init."""
@@ -79,9 +80,11 @@ class DefectTaskBuider(Builder):
         self.defect_task_store = defect_task_store
         self.locpot_store = locpot_store
         self.query = query or {}
+        self.chunk_size = chunk_size
         super().__init__(
             sources=[self.jobstore],
             targets=[self.defect_task_store, self.locpot_store],
+            chunk_size=chunk_size,
             **kwargs,
         )
 
