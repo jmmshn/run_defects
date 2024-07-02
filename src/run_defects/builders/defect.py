@@ -10,6 +10,8 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from emmet.core.charge_density import VolumetricDataDoc
+from emmet.core.defect import DefectTaskDoc, TaskDoc
 from icecream import ic
 from maggma.builders import Builder
 from maggma.builders.map_builder import MapBuilder
@@ -107,16 +109,38 @@ class DefectTaskBuider(Builder):
 
     def process_item(self, item: dict) -> dict:
         """Process the item."""
+        uuid = item["uuid"]
+        doc = item["doc"]
+        locpot_doc = item["locpot_doc"]
+
+        task_doc = TaskDoc(**doc["output"])
+        defect_task = DefectTaskDoc.from_taskdoc(task_doc)
+        defect_task.task_id = uuid
+
+        locpot_doc = VolumetricDataDoc(
+            fs_id=locpot_doc["blob_uuid"], task_id=defect_task.task_id
+        )
+
         return {
-            "task_id": item["uuid"],
-            "defect_name": item["output"]["additional_json"]["info"]["defect_name"],
-            "bulk_formula": item["output"]["additional_json"]["info"]["bulk_formula"],
-            "run_type": item["output"]["calcs_reversed"][0]["run_type"],
-            "defect": item["output"]["additional_json"]["info"]["defect"],
+            "defect_task": jsanitize(defect_task.model_dump(), recursive_msonable=True),
+            "locpot_doc": locpot_doc.model_dump(),
         }
 
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
+        items = list(filter(None, items))
+        self.logger.info(f"Updating {len(items)} defect tasks.")
+
+        defect_tasks = [d["defect_task"] for d in items]
+        locpot_docs = [d["locpot_doc"] for d in items]
+
+        for doc_ in locpot_docs:
+            doc_[self.locpot_store.last_updated_field] = _utc()
+        self.locpot_store.update(locpot_docs)
+
+        for doc_ in defect_tasks:
+            doc_[self.defect_task_store.last_updated_field] = _utc()
+        self.defect_task_store.update(defect_tasks)
 
 
 class DielectricBuilder(MapBuilder):
