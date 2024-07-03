@@ -127,7 +127,7 @@ class DefectTaskBuider(Builder):
 
         return {
             "defect_task": jsanitize(
-                _get_dict_no_extra(defect_task), recursive_msonable=True
+                _get_dict_no_extra(defect_task), strict=True, allow_bson=True
             ),
             "locpot_doc": _get_dict_no_extra(locpot_doc),
         }
