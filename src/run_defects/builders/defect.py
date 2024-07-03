@@ -123,7 +123,9 @@ class DefectTaskBuider(Builder):
         defect_task.vasp_objects = None
 
         locpot_doc = VolumetricDataDoc(
-            fs_id=locpot_doc["blob_uuid"], task_id=defect_task.task_id
+            fs_id=locpot_doc["blob_uuid"],
+            task_id=defect_task.task_id,
+            data=locpot_doc["data"],
         )
 
         return {
