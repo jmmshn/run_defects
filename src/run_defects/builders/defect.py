@@ -132,7 +132,7 @@ class DefectTaskBuider(Builder):
             "defect_task": jsanitize(
                 _get_dict_no_extra(defect_task), strict=True, allow_bson=True
             ),
-            "locpot_doc": _get_dict_no_extra(locpot_doc),
+            "locpot_doc": locpot_doc,
         }
 
     def update_targets(self, items: dict | list) -> None:
