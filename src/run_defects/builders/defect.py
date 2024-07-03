@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 
     from jobflow import JobStore
     from maggma.stores import Store
+    from pydantic import BaseModel
 
 DEFECT_JOB_QUERY = {
     "output.additional_json.info.defect_name": {"$exists": True},
@@ -125,8 +126,10 @@ class DefectTaskBuider(Builder):
         )
 
         return {
-            "defect_task": jsanitize(defect_task.model_dump(), recursive_msonable=True),
-            "locpot_doc": locpot_doc.model_dump(),
+            "defect_task": jsanitize(
+                _get_dict_no_extra(defect_task), recursive_msonable=True
+            ),
+            "locpot_doc": _get_dict_no_extra(locpot_doc),
         }
 
     def update_targets(self, items: dict | list) -> None:
@@ -894,3 +897,18 @@ def _get_dielectric_data(mp_id: str) -> dict:
     if not res:
         return None
     return res[0].model_dump()
+
+
+def _get_dict_no_extra(document: BaseModel, data: dict = None) -> dict:
+    """Recursively removes extra keys from the dumped version of a Model."""
+    if data is None:
+        data = document.model_dump()
+    if document.model_extra:
+        for key in document.model_extra:
+            data.pop(key, None)
+
+    for fieldname in document.model_fields:
+        value = getattr(document, fieldname)
+        if hasattr(value, "model_extra"):
+            data[fieldname] = _get_dict_no_extra(value, data[fieldname])
+    return data
