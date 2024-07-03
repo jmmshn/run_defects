@@ -120,6 +120,7 @@ class DefectTaskBuider(Builder):
         task_doc = TaskDoc(**doc["output"])
         defect_task = DefectTaskDoc.from_taskdoc(task_doc)
         defect_task.task_id = uuid
+        defect_task.vasp_objects = None
 
         locpot_doc = VolumetricDataDoc(
             fs_id=locpot_doc["blob_uuid"], task_id=defect_task.task_id
