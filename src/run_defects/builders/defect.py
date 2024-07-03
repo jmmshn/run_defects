@@ -113,27 +113,30 @@ class DefectTaskBuider(Builder):
 
     def process_item(self, item: dict) -> dict:
         """Process the item."""
-        uuid = item["uuid"]
-        doc = item["doc"]
-        locpot_doc = item["locpot_doc"]
+        try:
+            uuid = item["uuid"]
+            doc = item["doc"]
+            locpot_doc = item["locpot_doc"]
 
-        task_doc = TaskDoc(**doc["output"])
-        defect_task = DefectTaskDoc.from_taskdoc(task_doc)
-        defect_task.task_id = uuid
-        defect_task.vasp_objects = None
+            task_doc = TaskDoc(**doc["output"])
+            defect_task = DefectTaskDoc.from_taskdoc(task_doc)
+            defect_task.task_id = uuid
+            defect_task.vasp_objects = None
 
-        locpot_doc = VolumetricDataDoc(
-            fs_id=locpot_doc["blob_uuid"],
-            task_id=defect_task.task_id,
-            data=locpot_doc["data"],
-        )
+            locpot_doc = VolumetricDataDoc(
+                fs_id=locpot_doc["blob_uuid"],
+                task_id=defect_task.task_id,
+                data=locpot_doc["data"],
+            )
 
-        return {
-            "defect_task": jsanitize(
-                _get_dict_no_extra(defect_task), strict=True, allow_bson=True
-            ),
-            "locpot_doc": locpot_doc.model_dump(),
-        }
+            return {
+                "defect_task": jsanitize(
+                    _get_dict_no_extra(defect_task), strict=True, allow_bson=True
+                ),
+                "locpot_doc": locpot_doc.model_dump(),
+            }
+        except Exception:
+            return None
 
     def update_targets(self, items: dict | list) -> None:
         """Update the target store."""
