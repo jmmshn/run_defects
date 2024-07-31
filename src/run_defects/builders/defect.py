@@ -625,7 +625,12 @@ class FreysoldtBuilder(MapBuilder):
                     f"Dielectric data not found for {doc['task_id']}. Skipping."
                 )
                 continue
-            doc_ = self._replace_blob(doc, dry_run=False)
+
+            try:
+                doc_ = self._replace_blob(doc, dry_run=False)
+            except Exception:
+                self.logger.exception(f"Error reading blob for {doc['task_id']}")
+                continue
             doc_["dielectric_data"] = dielectric_doc["dielectric_data"]
             yield doc_
 
